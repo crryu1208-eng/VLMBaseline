@@ -17,6 +17,18 @@ import numpy as np
 from vlmbaseline.scene import Scene
 from vlmbaseline.spatial.search import rank
 
+# visible states that call for an action (augment/describe_objects.py STATES); other states are normal
+ACTIONS = {
+    "잎이 시들거나 누렇게 변함": "물 주기 또는 식물 교체",
+    "거의 가득 참": "쓰레기통 비우기",
+    "넘침": "쓰레기통 바로 비우기",
+    "물건이 어지럽게 놓여 있음": "책상 위 정리",
+    "어지러움": "선반 정리",
+    "위에 물건이 쌓여 있음": "위에 쌓인 물건 정리",
+    "이상이 보임": "상태 점검",
+    "열림": "닫혀 있어야 하면 닫기",
+}
+
 SKIP_LANDMARK = {"book", "paper", "sticky note", "document", "folder", "ceiling light"}
 
 
@@ -111,17 +123,26 @@ class SpatialIndex:
         return {"query": query, "objects": out}
 
     def inventory(self, label=None):
-        """Objects with their state and uses (for task suggestions); books / papers only counted."""
+        """Objects whose visible state calls for an action (cleaning, tidying, repair), with the action, and the
+        number of objects per state; states are as seen when the scene was recorded."""
         objs = [o for o in self.s.objects if label is None or o.label == label]
-        rows, small = [], Counter()
+        todo, states, unknown = [], Counter(), 0
         for o in objs:
-            if o.label in SKIP_LANDMARK and label is None:
-                small[o.label] += 1
-                continue
             v = o.vlm or {}
-            rows.append({"symbol": o.symbol, "label": o.label, "name": v.get("이름"), "state": v.get("상태"),
-                         "uses": v.get("용도"), "label_ok": v.get("라벨_맞음")})
-        return {"objects": rows, "counted_only": dict(small)}
+            st = v.get("상태")
+            if not st:
+                unknown += 1
+                continue
+            states[f"{o.label}: {st}"] += 1
+            act = ACTIONS.get(st) or ("상태 점검" if "이상" in st else None)
+            if o.label in ("door", "glass door") and st == "열림":
+                act = None  # open doors are normal
+            if v.get("점검_필요"):
+                act = (act + "; " if act else "") + (v.get("점검_이유") or "점검")
+            if act:
+                todo.append({"symbol": o.symbol, "label": o.label, "name": v.get("이름"), "state": st, "action": act})
+        return {"actionable": todo, "state_counts": dict(states.most_common()), "not_described": unknown,
+                "note": "only 'actionable' objects need work; states are as seen when the scene was recorded"}
 
     def nearest(self, symbol, label, k=1):
         o = self._o(symbol)
@@ -208,11 +229,13 @@ TOOLS = [
     _t("count", "Number of objects with a label (English label from the scene's label list).",
        label=dict(S, description="English object label, e.g. 'chair'")),
     _t("find", "All objects with a label and their positions.", label=dict(S, description="English object label")),
-    _t("search", "Find objects from a free-text description in Korean or English (appearance, use, state), "
-       "e.g. '앉을 수 있는 곳', '주황색 안내판'. Returns the best matches with their descriptions.",
+    _t("search", "Find objects from a free-text description in Korean or English (kind, use, appearance), "
+       "e.g. '앉을 수 있는 곳', '음식을 데우는 기계', '주황색 안내판'. Use this for any '... 어디 있어?' question "
+       "that has no object symbol. Returns the best matches with symbols and descriptions.",
        query=dict(S, description="description of the object"),
        k={"type": "integer", "description": "how many (default 5)", "optional": True}),
-    _t("inventory", "Objects with their visible state and uses, for suggesting tasks (books / papers only counted).",
+    _t("inventory", "ONLY for task suggestions (cleaning, tidying, repair): objects whose visible state needs work, "
+       "with the action. Do not use it to locate objects.",
        label={"type": "string", "description": "only this English label (optional)", "optional": True}),
     _t("object_info", "Label, position, size, room and nearby objects of one object.",
        symbol=dict(S, description="object symbol, e.g. 'O817'")),

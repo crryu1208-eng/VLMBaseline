@@ -13,7 +13,10 @@ Producing and merging scene graphs stays in hydra-observation-ws.
 
 ## Layout
 
-    vlmbaseline/scene/    export loader (pure Python + numpy, no spark_dsg)
+    vlmbaseline/scene/    export loader (pure Python + numpy, no spark_dsg), best keyframe views of an object
+    vlmbaseline/augment/  VLM descriptions of every object, written into the graph (metadata.vlm)
+    vlmbaseline/spatial/  spatial tools (count, nearest, distances, routes, search), tool-using QA / guidance agent
+    vlmbaseline/bench/    VLM benchmark (object naming, descriptions, scene QA)
     docs/                 export format, design notes
     tests/
     data/                 exports, not tracked (symlinks; see data/README.md)
@@ -23,6 +26,14 @@ Producing and merging scene graphs stays in hydra-observation-ws.
     uv venv .venv && uv pip install --python .venv/bin/python -e '.[dev]'
     ln -s ~/hydra_data/realtime/export/library_merged_01_03_04_yaw015_ov_data data/library_merged
     .venv/bin/python -m pytest -q
+
+## Use
+
+    python -m vlmbaseline.augment.describe_objects data/library_merged      # ~4 s per object (Qwen3.5-9B, 4-bit)
+    python -m vlmbaseline.augment.write_dsg data/library_merged
+    python -m vlmbaseline.spatial.bench_qa Qwen/Qwen3.5-9B                   # QA / guidance benchmark
+
+Results: [docs/bench_2026-11-19.md](docs/bench_2026-11-19.md).
 
 ## Licenses
 

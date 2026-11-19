@@ -21,12 +21,34 @@ from vlmbaseline.bench.run import generate, load
 from vlmbaseline.scene import load_export
 from vlmbaseline.scene.views import best_views
 
+# visible states to choose from, per label (others: DEFAULT_STATES)
+STATES = {
+    ("potted plant", "plant"): ["건강함", "잎이 시들거나 누렇게 변함", "알 수 없음"],
+    ("chair", "armchair", "office chair", "bench"): ["비어 있음", "사람이 앉아 있음", "물건이 놓여 있음", "알 수 없음"],
+    ("desk", "table", "coffee table"): ["비어 있음", "물건이 정돈되어 놓여 있음", "물건이 어지럽게 놓여 있음",
+                                        "사람이 사용 중", "알 수 없음"],
+    ("trash can",): ["비어 있음", "여유 있음", "거의 가득 참", "넘침", "알 수 없음"],
+    ("lamp", "ceiling light"): ["켜짐", "꺼짐", "알 수 없음"],
+    ("monitor", "computer", "screen", "blank monitor"): ["화면 켜짐", "화면 꺼짐", "알 수 없음"],
+    ("door", "glass door"): ["열림", "닫힘", "알 수 없음"],
+    ("bookshelf", "shelf"): ["정돈됨", "어지러움", "일부 비어 있음", "알 수 없음"],
+    ("box", "cabinet", "filing cabinet", "locker", "drawer"): ["닫힘", "열림", "위에 물건이 쌓여 있음", "알 수 없음"],
+    ("whiteboard",): ["깨끗함", "글씨나 그림이 있음", "알 수 없음"],
+}
+DEFAULT_STATES = ["정상으로 보임", "이상이 보임", "알 수 없음"]
+
+
+def states_for(label):
+    return next((v for k, v in STATES.items() if label in k), DEFAULT_STATES)
+
+
 PROMPT = """사진들은 같은 물체를 다른 시점에서 본 것입니다. 빨간 상자 안의 물체를 보세요(뒤의 사진들은 확대).
 이 물체는 3D 씬그래프에서 '{label}'(으)로 분류되어 있습니다. 아래 JSON 형식으로만 답하고 값은 한국어로 쓰세요.
-{{"이름": "", "라벨_맞음": true, "색": "", "재질": "", "상태": "", "용도": ["", ""], "설명": "한 문장"}}
+{{"이름": "", "라벨_맞음": true, "색": "", "재질": "", "상태": "", "점검_필요": false, "점검_이유": "", "용도": ["", ""], "설명": "한 문장"}}
 - 이름: 한국어 일반 명사(영어 금지)
 - 라벨_맞음: 상자 안 물체가 '{label}'이 맞으면 true, 아니면 false
-- 상태: 이 물체에 실제로 보이는 상태만 짧게(사용 중, 비어 있음, 켜짐 등). 판단할 수 없으면 "알 수 없음"
+- 상태: 다음 중 사진에서 확인되는 하나만 고르세요: {states}
+- 점검_필요: 정리·청소·수리·교체가 필요해 보이면 true, 이유를 점검_이유에 짧게. 아니면 false, 점검_이유는 ""
 - 사진에 보이지 않는 내용은 지어내지 마세요."""
 
 
@@ -81,7 +103,7 @@ def main():
                 x += i.width
             sheet.thumbnail((1600, 480))
             sheet.save(out / "views" / f"{o.symbol}.jpg", quality=85)
-            text, dt, _, _ = generate(proc, model, fulls + crops, PROMPT.format(label=o.label), 260)
+            text, dt, _, _ = generate(proc, model, fulls + crops, PROMPT.format(label=o.label, states=", ".join(states_for(o.label))), 260)
             j = parse(text)
             res[o.symbol] = dict(j or {}, label=o.label, views=[kf.node for _, kf, _ in v], raw=text,
                                  ok=j is not None, sec=round(dt, 2))

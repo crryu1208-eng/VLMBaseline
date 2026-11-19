@@ -96,7 +96,7 @@ def attach_vlm(scene: "Scene", path: str | Path) -> int:
     for o in scene.objects:
         r = d.get(o.symbol)
         if r and r.get("ok"):
-            o.vlm = {k: r[k] for k in ("이름", "라벨_맞음", "색", "재질", "상태", "용도", "설명") if k in r}
+            o.vlm = {k: r[k] for k in ("이름", "라벨_맞음", "색", "재질", "상태", "점검_필요", "점검_이유", "용도", "설명") if k in r}
             n += 1
     return n
 
