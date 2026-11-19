@@ -1,0 +1,14 @@
+# scene graph exports, images, model weights stay out of git (the GitHub repo is public)
+data/*
+!data/README.md
+*.zip
+*.ply
+*.pt
+*.safetensors
+*.onnx
+models/
+.venv/
+__pycache__/
+*.egg-info/
+.pytest_cache/
+outputs/
