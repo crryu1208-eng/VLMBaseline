@@ -15,13 +15,15 @@ from collections import Counter, defaultdict
 import numpy as np
 
 from vlmbaseline.scene import Scene
+from vlmbaseline.spatial.search import rank
 
 SKIP_LANDMARK = {"book", "paper", "sticky note", "document", "folder", "ceiling light"}
 
 
 class SpatialIndex:
-    def __init__(self, scene: Scene):
+    def __init__(self, scene: Scene, encoder=None):
         self.s = scene
+        self.encoder = encoder  # search.TextEncoder for free-text search (optional)
         self.obj = {o.symbol: o for o in scene.objects}
         self.place = {p.id: p for p in scene.places}
         self.adj = defaultdict(list)
@@ -55,6 +57,8 @@ class SpatialIndex:
 
     def _brief(self, o, ref=None):
         r = {"symbol": o.symbol, "label": o.label, "xy": self._xy(o), "top_z": round(float(o.center[2] + o.size[2] / 2), 2)}
+        if o.vlm:
+            r["name"] = o.vlm.get("이름")
         if ref is not None:
             r["dist_m"] = round(float(np.linalg.norm(o.center[:2] - ref.center[:2])), 2)
         return r
@@ -91,7 +95,33 @@ class SpatialIndex:
         r = self._brief(o)
         r.update(size_m=[round(float(v), 2) for v in o.size], room=o.room,
                  nearby=[self._brief(x, o) for x in near])
+        if o.vlm:
+            r["description"] = o.vlm
         return r
+
+    def search(self, query, k=5):
+        """Objects matching a free-text description (Korean or English)."""
+        out = []
+        for score, o, parts in rank(self.s.objects, query, self.encoder, int(k)):
+            b = self._brief(o)
+            if o.vlm:
+                b.update(state=o.vlm.get("상태"), uses=o.vlm.get("용도"), summary=o.vlm.get("설명"))
+            b["match"] = parts
+            out.append(b)
+        return {"query": query, "objects": out}
+
+    def inventory(self, label=None):
+        """Objects with their state and uses (for task suggestions); books / papers only counted."""
+        objs = [o for o in self.s.objects if label is None or o.label == label]
+        rows, small = [], Counter()
+        for o in objs:
+            if o.label in SKIP_LANDMARK and label is None:
+                small[o.label] += 1
+                continue
+            v = o.vlm or {}
+            rows.append({"symbol": o.symbol, "label": o.label, "name": v.get("이름"), "state": v.get("상태"),
+                         "uses": v.get("용도"), "label_ok": v.get("라벨_맞음")})
+        return {"objects": rows, "counted_only": dict(small)}
 
     def nearest(self, symbol, label, k=1):
         o = self._o(symbol)
@@ -178,6 +208,12 @@ TOOLS = [
     _t("count", "Number of objects with a label (English label from the scene's label list).",
        label=dict(S, description="English object label, e.g. 'chair'")),
     _t("find", "All objects with a label and their positions.", label=dict(S, description="English object label")),
+    _t("search", "Find objects from a free-text description in Korean or English (appearance, use, state), "
+       "e.g. '앉을 수 있는 곳', '주황색 안내판'. Returns the best matches with their descriptions.",
+       query=dict(S, description="description of the object"),
+       k={"type": "integer", "description": "how many (default 5)", "optional": True}),
+    _t("inventory", "Objects with their visible state and uses, for suggesting tasks (books / papers only counted).",
+       label={"type": "string", "description": "only this English label (optional)", "optional": True}),
     _t("object_info", "Label, position, size, room and nearby objects of one object.",
        symbol=dict(S, description="object symbol, e.g. 'O817'")),
     _t("nearest", "Objects of a label closest (horizontal straight-line distance) to a given object.",

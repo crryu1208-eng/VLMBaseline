@@ -16,7 +16,7 @@ import time
 from pathlib import Path
 
 import torch
-from PIL import Image, ImageDraw
+from PIL import Image
 from transformers import AutoModelForImageTextToText, AutoProcessor, BitsAndBytesConfig
 
 RECOG = ("What is the object inside the red box? Answer with a short English noun phrase only "

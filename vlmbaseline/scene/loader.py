@@ -29,6 +29,7 @@ class Object:
     n_obs: int
     place: int | None = None
     room: int | None = None
+    vlm: dict | None = None  # VLM description (augment/describe_objects.py): 이름, 색, 재질, 상태, 용도, 설명
 
 
 @dataclass
@@ -86,6 +87,18 @@ def _pose(p: dict) -> np.ndarray:
     ]
     T[:3, 3] = p["t"]
     return T
+
+
+def attach_vlm(scene: "Scene", path: str | Path) -> int:
+    """Attach the VLM descriptions (objects_vlm.json) to the scene's objects; returns how many were attached."""
+    d = json.loads(Path(path).read_text())
+    n = 0
+    for o in scene.objects:
+        r = d.get(o.symbol)
+        if r and r.get("ok"):
+            o.vlm = {k: r[k] for k in ("이름", "라벨_맞음", "색", "재질", "상태", "용도", "설명") if k in r}
+            n += 1
+    return n
 
 
 def load_export(root: str | Path) -> Scene:
