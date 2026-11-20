@@ -102,15 +102,17 @@ def half_m(x):
     return max(0.5, round(x * 2) / 2)
 
 
-def steps(pts, yaw=None, landmarks=(), goal_xy=None, near=1.5):
+def steps(pts, yaw=None, landmarks=(), goal_xy=None, near=1.5, area_at=None):
     """Turn-by-turn steps along a floor polyline.
 
     yaw        current heading; None means unknown (the first step then has no turn).
     landmarks  [(symbol, label, name, xy, size)] objects that may be passed.
+    area_at    optional function xy -> area name; a step that ends in another area gets 'into_area'.
     Returns (steps, final_yaw); each step: turn, walk_m, passing [{symbol, label, name, side}].
     """
     out, used = [], set()
     head = yaw
+    cur = area_at(np.asarray(pts[0])) if area_at else None
     for a, b in legs(pts):
         v = b - a
         L = float(np.linalg.norm(v))
@@ -135,6 +137,11 @@ def steps(pts, yaw=None, landmarks=(), goal_xy=None, near=1.5):
             used.add(sym)
         st["passing"] = [{"symbol": s, "label": lb, **({"name": n} if n else {}), "side": sd}
                          for _, _, s, lb, n, sd in sel]
+        if area_at:
+            nxt = area_at(b)
+            if nxt and nxt != cur:
+                st["into_area"] = nxt
+            cur = nxt
         out.append(st)
         head = h
     return out, head

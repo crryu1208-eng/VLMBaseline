@@ -10,6 +10,7 @@ Every tool returns a JSON-serialisable dict; TOOLS holds their function-calling 
 from __future__ import annotations
 
 import heapq
+import re
 from collections import Counter, defaultdict
 
 import numpy as np
@@ -17,6 +18,15 @@ import numpy as np
 from vlmbaseline.scene import Scene
 from vlmbaseline.spatial import nav
 from vlmbaseline.spatial.search import rank
+
+
+def _bi(s):
+    """Two-character pieces of a text without spaces (single characters match too easily)."""
+    s = re.sub(r"\s+", "", s or "")
+    return {s[i:i + 2] for i in range(len(s) - 1)} - _COMMON
+
+
+_COMMON = {"공간", "구역", "있는", "는곳", "있어", "어디", "가는", "으로", "까지"}  # too common to tell areas apart
 
 # visible states that call for an action (augment/describe_objects.py STATES); other states are normal
 ACTIONS = {
@@ -49,6 +59,8 @@ class SpatialIndex:
         for o in scene.objects:
             self.on_place[o.place].append(o)
         self.labels = Counter(o.label for o in scene.objects)
+        # areas (scene.areas, from attach_areas before building the index): place -> area id
+        self.area_of = {p: a for a, r in scene.areas.items() for p in r.get("places", [])}
         self.pose = None  # (x, y, yaw) of the user, set by set_pose(); enables around_me / guide_me
 
     def set_pose(self, x, y, yaw):
@@ -117,6 +129,30 @@ class SpatialIndex:
         return {"direction": nav.direction_word(a), "clock": nav.clock(a),
                 "dist_m": round(float(np.linalg.norm(v)), 1)}
 
+    def _area_brief(self, aid):
+        r = self.s.areas.get(aid)
+        if r is None:
+            return None
+        return {"area": aid, "name": r.get("이름"), "kind": r.get("종류")}
+
+    def _area_arg(self, area):
+        """Area by id or by name / description text."""
+        if not self.s.areas:
+            raise ValueError("구역 정보가 없습니다")
+        a = str(area).strip()
+        if re.fullmatch(r"\d+", a) and int(a) in self.s.areas:
+            return int(a)
+        exact = [k for k, r in self.s.areas.items() if r.get("이름") == a]
+        if len(exact) == 1:
+            return exact[0]
+        best = self.areas(query=a, k=5)["areas"]
+        if not best or best[0]["score"] < 1:
+            raise KeyError(f"no area matching {area}")
+        tie = [b["name"] for b in best if b["score"] == best[0]["score"]]
+        if len(tie) > 1:  # e.g. '열람 공간' fits several areas: do not pick one at random
+            raise ValueError(f"'{area}'에 맞는 구역이 여러 개입니다: {', '.join(tie)}. 사용자가 말한 구역 이름 전체로 다시 호출하세요.")
+        return best[0]["area"]
+
     def _need_pose(self):
         if self.pose is None:
             raise ValueError("현재 위치를 모릅니다. 출발 물체의 기호가 필요합니다.")
@@ -139,7 +175,7 @@ class SpatialIndex:
         near = sorted((x for x in self.s.objects if x is not o and x.label not in SKIP_LANDMARK),
                       key=lambda x: np.linalg.norm(x.center[:2] - o.center[:2]))[:4]
         r = self._brief(o)
-        r.update(size_m=[round(float(v), 2) for v in o.size], room=o.room,
+        r.update(size_m=[round(float(v), 2) for v in o.size], area=self._area_brief(self.area_of.get(o.place)),
                  nearby=[self._brief(x, o) for x in near])
         if o.vlm:
             r["description"] = o.vlm
@@ -234,8 +270,21 @@ class SpatialIndex:
                 "straight_m": round(float(np.linalg.norm(a.center[:2] - b.center[:2])), 2),
                 "landmarks": marks[:8]}
 
-    def guide_to(self, start, label):
-        """Nearest object of a label from the start object, and the walking route to it."""
+    def guide_to(self, start, label=None, area=None):
+        """Nearest object of a label from the start object and the walking route to it; or the route to an area."""
+        if area is not None and not label:
+            a = self._o(start)
+            dist, prev = self._dijkstra(a.place)
+            aid = self._area_arg(area)
+            saved = self.pose
+            try:  # same steps as from a pose, with an unknown heading
+                self.pose = (float(a.center[0]), float(a.center[1]), None)
+                r = self._guide_area(a.place, dist, prev, aid)
+            finally:
+                self.pose = saved
+            return dict(r, start=self._brief(a))
+        if not label:
+            raise ValueError("label or area is needed")
         n = self.nearest(start, label)["nearest"]
         if not n:
             return {"start": start, "label": label, "error": "no such object"}
@@ -243,6 +292,27 @@ class SpatialIndex:
 
     SIDES = {"앞": {"앞", "왼쪽 앞", "오른쪽 앞"}, "왼쪽": {"왼쪽", "왼쪽 앞", "왼쪽 뒤"},
              "오른쪽": {"오른쪽", "오른쪽 앞", "오른쪽 뒤"}, "뒤": {"뒤", "왼쪽 뒤", "오른쪽 뒤"}}
+
+    def _area_name_at(self, xy):
+        if not self.s.areas:
+            return None
+        ids = list(self.adj)
+        c = np.array([self.place[p].center[:2] for p in ids])
+        aid = self.area_of.get(ids[int(np.linalg.norm(c - xy, axis=1).argmin())])
+        return (self.s.areas.get(aid) or {}).get("이름")
+
+    def _guide_area(self, src, dist, prev, aid):
+        x, y, yaw = self.pose
+        if self.area_of.get(src) == aid:
+            return {"goal_area": self._area_brief(aid), "already_there": True}
+        tgt = self._area_target(dist, aid)
+        path = self._path(prev, src, tgt)
+        pts = np.vstack([[x, y]] + [self.place[p].center[:2] for p in path])
+        lm = [(c.symbol, c.label, (c.vlm or {}).get("이름"), c.center[:2], float(np.prod(c.size)))
+              for c in self.s.objects if c.label not in SKIP_LANDMARK]
+        st, _ = nav.steps(pts, yaw, lm, area_at=self._area_name_at)
+        return {"goal_area": self._area_brief(aid), "walking_m": round(float(np.linalg.norm(pts[1] - pts[0])) + dist[tgt], 1),
+                "steps": st[:8]}
 
     def around_me(self, label=None, side=None, k=8, radius=4.0):
         """Objects around the user with direction relative to the heading (앞, 왼쪽, 오른쪽 뒤 ...);
@@ -271,12 +341,14 @@ class SpatialIndex:
             return {"side": side, "objects": [], "note": f"{radius} m 안에서 {side}쪽에 있는 물체가 없습니다"}
         return {"objects": out}
 
-    def guide_me(self, label=None, goal=None):
-        """Turn-by-turn directions from the user's pose to an object (goal symbol) or the nearest object of a
-        label by walking distance."""
+    def guide_me(self, label=None, goal=None, area=None):
+        """Turn-by-turn directions from the user's pose to an object (goal symbol), the nearest object of a
+        label by walking distance, or an area (id or name)."""
         self._need_pose()
         src = self._pose_place()
         dist, prev = self._dijkstra(src)
+        if area is not None and not goal and not label:
+            return self._guide_area(src, dist, prev, self._area_arg(area))
         if goal:
             o = self._o(goal)
         elif label:
@@ -293,7 +365,7 @@ class SpatialIndex:
         pts = np.vstack([[x, y]] + [self.place[p].center[:2] for p in path] + [o.center[:2]])
         lm = [(c.symbol, c.label, (c.vlm or {}).get("이름"), c.center[:2], float(np.prod(c.size)))
               for c in self.s.objects if c is not o and c.label not in SKIP_LANDMARK and c.label != o.label]
-        st, h = nav.steps(pts[:-1], yaw, lm)
+        st, h = nav.steps(pts[:-1], yaw, lm, area_at=self._area_name_at)
         walk = float(np.linalg.norm(pts[1] - pts[0])) + dist[o.place]
         g = self._brief(o)
         g.pop("xy", None)
@@ -307,6 +379,50 @@ class SpatialIndex:
             if off > 1.5 else {}
         return {"goal": g, "walking_m": round(walk, 1), "steps": st[:8], **extra,
                 "note": "steps are turns relative to the user's heading; 'passing' objects are on that side"}
+
+    def areas(self, query=None, k=20):
+        """Areas of the floor (name, kind, one sentence); with a query, the best matching areas first."""
+        out = []
+        q = _bi(query) if query else None
+        for aid, r in self.s.areas.items():
+            b = {"area": aid, "name": r.get("이름"), "kind": r.get("종류"), "summary": r.get("설명"),
+                 "objects": sum(1 for o in self.s.objects if self.area_of.get(o.place) == aid)}
+            if q:
+                txt = " ".join([r.get("이름") or "", r.get("종류") or "", r.get("설명") or ""]
+                               + list(r.get("특징") or []) + list(r.get("용도") or []))
+                name_hit = len(q & _bi(r.get("이름"))) + len(q & _bi(r.get("종류")))
+                b["score"] = round(2 * name_hit + len(q & _bi(txt)) / 2, 1)
+            out.append(b)
+        if q:
+            out.sort(key=lambda b: -b["score"])
+        return {"areas": out[:int(k)]}
+
+    def area_info(self, area):
+        """One area: name, kind, description, uses, notable things, neighbouring areas, objects in it."""
+        aid = self._area_arg(area)
+        r = self.s.areas[aid]
+        objs = [o for o in self.s.objects if self.area_of.get(o.place) == aid and o.label not in SKIP_LANDMARK]
+        return {"area": aid, "name": r.get("이름"), "kind": r.get("종류"), "description": r.get("설명"),
+                "uses": r.get("용도"), "notable": r.get("특징"),
+                "neighbours": [self._area_brief(n) for n in r.get("neighbours", [])],
+                "objects": [{"symbol": o.symbol, "label": o.label, "name": (o.vlm or {}).get("이름")} for o in objs[:20]]}
+
+    def where_am_i(self):
+        """The area the user is in now, and the closest objects with their direction."""
+        self._need_pose()
+        aid = self.area_of.get(self._pose_place())
+        r = {"area": self.area_info(aid) if aid is not None else None}
+        if r["area"]:
+            r["area"].pop("objects", None)
+        r["around"] = self.around_me(k=4)["objects"]
+        return r
+
+    def _area_target(self, dist, aid):
+        """The place of an area closest by walking (from a Dijkstra result)."""
+        ps = [p for p in self.s.areas[aid].get("places", []) if p in dist]
+        if not ps:
+            raise ValueError("구역에 갈 수 없습니다")
+        return min(ps, key=dist.get)
 
     def call(self, name, args):
         fn = {t["function"]["name"]: getattr(self, t["function"]["name"]) for t in TOOLS + POSE_TOOLS}
@@ -347,19 +463,30 @@ TOOLS = [
        a=dict(S, description="object symbol"), b=dict(S, description="object symbol")),
     _t("extreme", "The largest, smallest, highest (top) or lowest (bottom) object.",
        kind={"type": "string", "enum": ["largest", "smallest", "highest", "lowest"]}),
-    _t("guide_to", "Guidance: the nearest object of a label from a start object and the walking route to it "
-       "(length, landmarks passed in order). Use for '가장 가까운 X까지 가는 길'.",
-       start=dict(S, description="start object symbol"), label=dict(S, description="English label of the goal")),
+    _t("guide_to", "Guidance from a start object: to the nearest object of a label (walking route, landmarks passed) "
+       "or to an area (turn-by-turn steps). Use for '가장 가까운 X까지 가는 길', 'O12에서 휴게 공간까지'.",
+       start=dict(S, description="start object symbol"),
+       label={"type": "string", "description": "English label of the goal", "optional": True},
+       area={"type": "string", "description": "goal area: id or name / description in Korean", "optional": True}),
+    _t("areas", "Areas (zones) of the floor with name, kind and summary, e.g. 복도, 열람 공간, 엘리베이터 앞. With a query "
+       "(Korean words of the area such as '휴게', '엘리베이터'), the best matching areas first (score 0 = no word "
+       "match: then judge from the names and summaries).",
+       query={"type": "string", "description": "description of the area (optional)", "optional": True}),
+    _t("area_info", "One area: name, kind, description, uses, notable things, neighbouring areas and objects in it.",
+       area=dict(S, description="area id or name")),
     _t("route", "Walking route from one object to another: length and landmarks passed on the way.",
        start=dict(S, description="start object symbol"), goal=dict(S, description="goal object symbol")),
 ]
 
 POSE_TOOLS = [
     _t("guide_me", "Guidance from where the user is now (their position and facing direction are known): "
-       "turn-by-turn steps (turn, walk m, objects passed on the left / right). Use for '여기서 X까지 어떻게 가?', "
-       "'가장 가까운 X로 안내해줘' when no start object is given.",
+       "turn-by-turn steps (turn, walk m, objects passed on the left / right, area entered). Use for "
+       "'여기서 X까지 어떻게 가?', '가장 가까운 X로 안내해줘', '휴게 공간으로 데려다줘' when no start object is given.",
        label={"type": "string", "description": "English label of the goal (nearest by walking)", "optional": True},
-       goal={"type": "string", "description": "goal object symbol", "optional": True}),
+       goal={"type": "string", "description": "goal object symbol", "optional": True},
+       area={"type": "string", "description": "goal area: id or name / description in Korean", "optional": True}),
+    _t("where_am_i", "The area the user is in now (name, kind, description, neighbouring areas) and the closest "
+       "objects with their direction. Use for '여기가 어디야?', '지금 어디쯤이야?'."),
     _t("around_me", "Objects around the user now, with direction relative to where they face (앞, 왼쪽, 오른쪽 뒤, "
        "clock 12 = ahead) and distance. Use for '내 앞에/왼쪽에 뭐 있어?', '근처에 X 있어?'.",
        label={"type": "string", "description": "only this English label (optional)", "optional": True},

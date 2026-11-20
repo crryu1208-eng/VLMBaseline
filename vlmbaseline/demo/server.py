@@ -19,7 +19,7 @@ from urllib.parse import parse_qs, urlparse
 
 import numpy as np
 
-from vlmbaseline.scene import attach_vlm, load_export
+from vlmbaseline.scene import attach_areas, attach_vlm, load_export
 from vlmbaseline.spatial import nav
 from vlmbaseline.spatial.tools import SpatialIndex
 
@@ -43,6 +43,7 @@ class Demo:
         for name in scenes:
             s = load_export(Path("data") / name)
             attach_vlm(s, self.aug / name / "objects_vlm.json")
+            attach_areas(s, self.aug / name / "areas_vlm.json")
             self.idx[name] = SpatialIndex(s, enc)
             if model is not None:
                 from vlmbaseline.spatial.agent import Agent
@@ -54,7 +55,7 @@ class Demo:
         idx = self.idx[name]
         s = idx.s
         r2 = lambda v: [round(float(x), 2) for x in v]
-        places = [{"id": p.id, "c": r2(p.center[:2]), "b": [r2(q[:2]) for q in p.boundary]} for p in s.places]
+        places = [{"id": str(p.id), "c": r2(p.center[:2]), "b": [r2(q[:2]) for q in p.boundary]} for p in s.places]
         edges = [[r2(idx.place[a].center[:2]), r2(idx.place[b].center[:2])] for a, b in s.edges
                  if a in idx.place and b in idx.place]
         objs = []
@@ -64,12 +65,18 @@ class Demo:
                          "name": v.get("이름"), "state": v.get("상태"), "desc": v.get("설명"),
                          "check": bool(v.get("점검_필요")),
                          "view": (self.aug / name / "views" / f"{o.symbol}.jpg").exists()})
-        return {"name": name, "places": places, "edges": edges, "objects": objs,
+        areas = [{"id": a, "name": r.get("이름"), "kind": r.get("종류"), "desc": r.get("설명"), "c": r.get("center"),
+                  "places": [str(p) for p in r.get("places", [])]} for a, r in s.areas.items()]
+        return {"name": name, "places": places, "areas": areas, "edges": edges, "objects": objs,
                 "keyframes": [list(nav.pose_from_T(k.world_T_sensor)) for k in s.keyframes[::10]]}
 
     # ------------------------------------------------------------ route polyline for the map
     def route_points(self, idx, tool, args, result):
-        if not isinstance(result, dict) or "error" in result or not isinstance(result.get("goal"), dict):
+        if not isinstance(result, dict) or "error" in result:
+            return None
+        if isinstance(result.get("goal_area"), dict) and "steps" in result:
+            return self._area_route(idx, tool, result)
+        if not isinstance(result.get("goal"), dict):
             return None
         goal = idx.obj.get(result["goal"]["symbol"])
         if goal is None:
@@ -91,6 +98,21 @@ class Demo:
         pts = head + [idx.place[p].center[:2].tolist() for p in path] + [goal.center[:2].tolist()]
         return [[round(x, 2), round(y, 2)] for x, y in pts]
 
+    def _area_route(self, idx, tool, result):
+        if tool == "guide_me":
+            if idx.pose is None:
+                return None
+            src, head = idx._pose_place(), [list(idx.pose[:2])]
+        else:
+            a = idx.obj.get((result.get("start") or {}).get("symbol"))
+            if a is None:
+                return None
+            src, head = a.place, [a.center[:2].tolist()]
+        dist, prev = idx._dijkstra(src)
+        tgt = idx._area_target(dist, result["goal_area"]["area"])
+        pts = head + [idx.place[p].center[:2].tolist() for p in idx._path(prev, src, tgt)]
+        return [[round(x, 2), round(y, 2)] for x, y in pts]
+
     # ------------------------------------------------------------ ask
     def ask(self, name, q, pose):
         idx = self.idx[name]
@@ -107,10 +129,12 @@ class Demo:
                     route = self.route_points(idx, tr["tool"], tr["args"], tr["result"])
                     if route:
                         break
+        goal_area = next((tr["result"]["goal_area"]["area"] for tr in reversed(trace)
+                          if isinstance(tr.get("result"), dict) and isinstance(tr["result"].get("goal_area"), dict)), None)
         warn = next((tr["result"]["warning"] for tr in trace
                      if isinstance(tr.get("result"), dict) and tr["result"].get("warning")), None)
         cited = [x for x in dict.fromkeys(re.findall(r"O\d+", ans)) if x in idx.obj]
-        return {"answer": ans, "trace": trace, "route": route, "cited": cited, "warning": warn,
+        return {"answer": ans, "trace": trace, "route": route, "cited": cited, "warning": warn, "goal_area": goal_area,
                 "sec": round(time.perf_counter() - t, 1)}
 
     @staticmethod

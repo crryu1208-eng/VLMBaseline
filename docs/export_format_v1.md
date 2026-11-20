@@ -32,16 +32,23 @@ branch `multi-session-merge`).
 
 ## VLM augmentation (VLMBaseline output)
 
-`python -m vlmbaseline.augment.describe_objects <export>` then `python -m vlmbaseline.augment.write_dsg <export>` write
+`python -m vlmbaseline.augment.describe_objects <export>`, `describe_areas <export>`, then `write_dsg <export>` write
 `outputs/augmented/<scene>/`:
 
 | File | Content |
 |---|---|
 | `objects_vlm.json` | per object symbol: the VLM's answer, the keyframes shown (`views`), raw text |
 | `dsg_vlm.json`, `dsg_with_mesh_vlm.json` | the export graph with `attributes.metadata.vlm` on each described object (loads in spark_dsg as before) |
-| `views/<symbol>.jpg` | the images given to the VLM, for checking |
+| `areas_vlm.json` | per area id: places, centre, neighbours, shape (area m², longest walk, width), objects, the VLM's answer |
+| `views/<symbol>.jpg`, `area_views/<id>.jpg` | the images given to the VLM, for checking |
 
 `metadata.vlm` keys (values in Korean): `이름` name, `라벨_맞음` label fits (bool), `색` colour, `재질` material,
 `상태` visible state (from a per-label list, e.g. 화분: 건강함 / 잎이 시들거나 누렇게 변함; 쓰레기통: 비어 있음 … 넘침),
 `점검_필요` needs cleaning / repair (bool) and `점검_이유`, `용도` uses (list), `설명` one sentence, `views`, `model`.
 States are as seen when the scene was recorded.
+
+Areas: 2D place nodes get `attributes.metadata.vlm_area = {area, 이름}`; the graph metadata gets `vlm.areas` =
+{id: {`이름` name, `종류` kind (복도, 출입구·로비, 엘리베이터·계단 앞, 열람·학습 공간, 서가, 사무 공간, 회의 공간, 휴게 공간,
+실험·작업 공간, 창고·보관 공간, 기타), `설명`, `용도`, `특징` notable things, `center`, `neighbours`, `n_places`}}.
+Areas are split in code (walkable regions of about 7 m), not Hydra rooms.
+

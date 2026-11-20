@@ -8,13 +8,13 @@
 :root {
   --bg: #f6f6f4; --panel: #ffffff; --ink: #1d1f22; --muted: #6b7076; --line: #dcdcd8;
   --floor: #e9ece6; --floor-line: #cfd5cb; --obj: #8a94a3; --check: #d9822b; --cite: #2a6fdb;
-  --route: #2a6fdb; --me: #c4322b; --kf: #b9bec5;
+  --route: #2a6fdb; --me: #c4322b; --kf: #b9bec5; --goal: #bcd3fb;
 }
 @media (prefers-color-scheme: dark) {
   :root {
     --bg: #17191c; --panel: #202327; --ink: #e8e9ea; --muted: #9aa0a6; --line: #34383d;
     --floor: #2a2e2a; --floor-line: #3a4039; --obj: #7d8794; --check: #e8994a; --cite: #6ea2ff;
-    --route: #6ea2ff; --me: #ff6b5f; --kf: #4a4f56;
+    --route: #6ea2ff; --me: #ff6b5f; --kf: #4a4f56; --goal: #2c4a7a;
   }
 }
 * { box-sizing: border-box; }
@@ -82,17 +82,19 @@ details pre { white-space: pre-wrap; font-size: 11.5px; max-height: 320px; overf
       <span><i style="background:var(--check)"></i>점검 필요</span>
       <span><i style="background:var(--cite)"></i>답에 나온 물체·경로</span>
       <span><i style="background:var(--me)"></i>내 위치</span>
+      <span><i style="background:var(--goal)"></i>목적지 구역</span>
     </div>
   </div>
 </div>
 <div id="card"></div>
 <script>
-const EX = ["여기서 가장 가까운 화분까지 어떻게 가?", "내 왼쪽에 뭐가 있어?", "내 앞에 뭐가 있어?", "의자는 몇 개 있어?",
+const EX = ["지금 여기가 어디야?", "이 층에는 어떤 공간들이 있어?", "여기서 가장 가까운 화분까지 어떻게 가?", "내 왼쪽에 뭐가 있어?", "내 앞에 뭐가 있어?", "의자는 몇 개 있어?",
             "앉아서 쉴 수 있는 곳은 어디 있어?", "이 공간에서 정리하거나 점검하면 좋을 일 3가지 추천해줘.", "콘센트는 어디 있어?"];
 const $ = id => document.getElementById(id);
 const cv = $("map"), ctx = cv.getContext("2d");
-let S = null, pose = null, route = null, cited = new Set(), view = {s: 20, x: 0, y: 0}, hover = null;
+let S = null, pose = null, route = null, goalArea = null, areaOf = {}, cited = new Set(), view = {s: 20, x: 0, y: 0}, hover = null;
 const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+const dark = () => matchMedia("(prefers-color-scheme: dark)").matches;
 
 function fit() {
   const r = cv.getBoundingClientRect(), d = devicePixelRatio || 1;
@@ -115,8 +117,11 @@ function draw() {
   if (!S) return;
   const r = cv.getBoundingClientRect();
   ctx.clearRect(0, 0, r.width, r.height);
-  ctx.fillStyle = css("--floor"); ctx.strokeStyle = css("--floor-line"); ctx.lineWidth = 1;
+  ctx.lineWidth = 1;
   for (const p of S.places) {
+    const a = areaOf[p.id];
+    ctx.fillStyle = a === undefined ? css("--floor") : `hsl(${(a * 137) % 360} 45% ${dark() ? 24 : 88}%)`;
+    if (goalArea !== null && a === goalArea) ctx.fillStyle = css("--goal");
     ctx.beginPath(); p.b.forEach((q, i) => { const [u, v] = W2S(q[0], q[1]); i ? ctx.lineTo(u, v) : ctx.moveTo(u, v); });
     ctx.closePath(); ctx.fill();
   }
@@ -133,6 +138,13 @@ function draw() {
       ctx.fillText(o === hover ? `${o.sym} ${o.name || o.label}` : o.sym, u + w / 2 + 4, v - 4);
     }
   }
+  ctx.font = "12px system-ui"; ctx.textAlign = "center";
+  for (const a of S.areas || []) {
+    if (!a.name || !a.c) continue;
+    const [u, v] = W2S(a.c[0], a.c[1]);
+    ctx.fillStyle = css("--muted"); ctx.globalAlpha = 0.9; ctx.fillText(a.name, u, v); ctx.globalAlpha = 1;
+  }
+  ctx.textAlign = "start";
   if (route) {
     ctx.strokeStyle = css("--route"); ctx.lineWidth = 3; ctx.setLineDash([8, 5]); ctx.beginPath();
     route.forEach((q, i) => { const [u, v] = W2S(q[0], q[1]); i ? ctx.lineTo(u, v) : ctx.moveTo(u, v); });
@@ -203,12 +215,13 @@ function showPose() {
   $("pose").textContent = pose ? `x ${pose[0].toFixed(1)}, y ${pose[1].toFixed(1)}, 방향 ${Math.round(pose[2] * 180 / Math.PI)}°`
                                : "정하지 않음 (위치 없이 질문)";
 }
-$("clear").onclick = () => { pose = null; route = null; showPose(); draw(); };
+$("clear").onclick = () => { pose = null; route = null; goalArea = null; showPose(); draw(); };
 
 async function loadScene(name) {
   $("status").textContent = "불러오는 중…";
   S = await (await fetch(`/api/scene?name=${encodeURIComponent(name)}`)).json();
-  pose = null; route = null; cited = new Set(); showPose(); home(); fit();
+  areaOf = {}; for (const a of S.areas || []) for (const p of a.places) areaOf[p] = a.id;
+  pose = null; route = null; goalArea = null; cited = new Set(); showPose(); home(); fit();
   $("status").textContent = `물체 ${S.objects.length}개, 장소 ${S.places.length}개`;
 }
 $("scene").onchange = e => loadScene(e.target.value);
@@ -222,7 +235,7 @@ async function ask() {
                                        body: JSON.stringify({scene: S.name, q, pose})});
     const d = await r.json();
     if (d.error) throw new Error(d.error);
-    cited = new Set(d.cited); route = d.route;
+    cited = new Set(d.cited); route = d.route; goalArea = d.goal_area ?? null;
     $("answer").innerHTML = esc(d.answer).replace(/\*\*(.+?)\*\*/g, "<b>$1</b>").replace(/O\d+/g, m => cited.has(m) ? `<span class="sym" data-s="${m}">${m}</span>` : m);
     $("trace").textContent = d.trace.map(t => `▶ ${t.tool}(${JSON.stringify(t.args)})\n${JSON.stringify(t.result, null, 1)}`).join("\n\n");
     $("time").textContent = `${d.sec}초` + (d.warning ? ` · 주의: ${d.warning}` : "");

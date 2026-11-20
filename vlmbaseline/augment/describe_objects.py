@@ -66,7 +66,7 @@ def views_for(scene, o, cache, k=2):
 
 
 def parse(text):
-    m = re.search(r"\{.*\}", text, re.S)
+    m = re.search(r"\[\s*\{.*\}\s*\]|\{.*\}", text, re.S)
     if not m:
         return None
     try:

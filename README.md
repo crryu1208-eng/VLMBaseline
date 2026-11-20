@@ -14,7 +14,7 @@ Producing and merging scene graphs stays in hydra-observation-ws.
 ## Layout
 
     vlmbaseline/scene/    export loader (pure Python + numpy, no spark_dsg), best keyframe views of an object
-    vlmbaseline/augment/  VLM descriptions of every object, written into the graph (metadata.vlm)
+    vlmbaseline/augment/  VLM descriptions of every object and of floor areas, written into the graph (metadata.vlm)
     vlmbaseline/spatial/  spatial tools (count, nearest, distances, routes, search, turn-by-turn from the user's pose),
                       tool-using QA / guidance agent
     vlmbaseline/demo/     local web page to try the agent (stdlib http.server, one HTML file)
@@ -32,9 +32,11 @@ Producing and merging scene graphs stays in hydra-observation-ws.
 ## Use
 
     python -m vlmbaseline.augment.describe_objects data/library_merged      # ~4 s per object (Qwen3.5-9B, 4-bit)
+    python -m vlmbaseline.augment.describe_areas data/library_merged       # areas (zones) named by the VLM
     python -m vlmbaseline.augment.write_dsg data/library_merged
     python -m vlmbaseline.spatial.bench_qa Qwen/Qwen3.5-9B                   # QA / guidance benchmark
     python -m vlmbaseline.spatial.bench_pose Qwen/Qwen3.5-9B                 # guidance from the user's pose
+    python -m vlmbaseline.spatial.bench_areas Qwen/Qwen3.5-9B                # questions about areas
 
 Try it in a browser (map, set your position / heading by dragging, ask in Korean, see the route):
 

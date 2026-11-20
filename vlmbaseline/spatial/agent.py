@@ -22,15 +22,20 @@ SYSTEM = """당신은 실내 공간 안내 도우미입니다. 이 공간의 3D 
 - 씬그래프에 없는 정보(콘센트, 와이파이, 온도, 운영 시간, 지금 있는 사람 수, 물건의 내부 상태 등)는 추측하지 말고
   '씬그래프로는 확인할 수 없습니다'라고 답하세요. 물체의 상태는 촬영 당시 기준입니다.
 - 도구 결과의 영어 필드 이름(needs_check 등)이나 null을 답에 그대로 쓰지 마세요.
+- 구역(복도, 열람 공간, 엘리베이터 앞 등)을 묻거나 구역으로 안내할 때는 areas, area_info, guide_to(area)를 쓰고,
+  답에서는 구역 번호 대신 구역 이름으로 부르세요.
 - route, guide_to의 출발 물체는 사용자가 말한 기호여야 합니다. 출발점이나 현재 위치를 모르면 지어내지 말고 사용자에게 어디에 있는지 물어보세요.
 - 거리는 m 단위입니다. 도구 결과만 근거로 한국어로 짧게 답하세요."""
 
 POSE_RULE = """
 - 사용자의 현재 위치와 바라보는 방향을 알고 있습니다. '여기서', '나', '지금' 기준의 길 안내는 guide_me를,
+  '여기가 어디야?'는 where_am_i를, 구역으로 가는 길은 guide_me(area)를,
   주변·앞·왼쪽·오른쪽·뒤에 무엇이 있는지는 around_me를 호출하세요(특정 방향이면 side 인자를 쓰고, 결과에 있는 물체만 답하세요).
 - guide_me의 steps를 순서대로 '(회전) 후 약 N m, 왼쪽/오른쪽에 (물체)를 지나' 식으로 안내하고, 마지막에 목적지가 어느 쪽인지 말하세요.
   방향(앞, 왼쪽, 오른쪽, 뒤, N시 방향)은 도구 결과 그대로 쓰고 바꾸지 마세요.
 - 도구 결과에 warning이 있으면 그 내용을 답 첫머리에 알려 주세요."""
+
+AREA_TOOLS = {"areas", "area_info", "where_am_i"}
 
 CALL = re.compile(r"<tool_call>\s*<function=([\w_]+)>(.*?)</function>\s*</tool_call>", re.S)
 PARAM = re.compile(r"<parameter=([\w_]+)>\s*(.*?)\s*</parameter>", re.S)
@@ -58,6 +63,8 @@ class Agent:
     def _gen(self, msgs, max_new_tokens=384, prefix=""):
         """Generate the next assistant turn; `prefix` is forced as its start (e.g. '<tool_call>')."""
         tools = TOOLS + POSE_TOOLS if self.idx.pose is not None else TOOLS
+        if not self.idx.s.areas:  # no area descriptions: hide the area tools
+            tools = [t for t in tools if t["function"]["name"] not in AREA_TOOLS]
         text = self.proc.apply_chat_template(msgs, tools=tools, add_generation_prompt=True, tokenize=False,
                                              enable_thinking=False) + prefix
         inputs = self.proc.tokenizer(text, return_tensors="pt", add_special_tokens=False).to(self.model.device)
@@ -72,7 +79,10 @@ class Agent:
         system = self.base + (POSE_RULE if pose is not None else "")
         msgs = [{"role": "system", "content": [{"type": "text", "text": system}]},
                 {"role": "user", "content": [{"type": "text", "text": question}]}]
-        trace, nudged, checked, named = [], False, False, False
+        trace, nudged, checked, named, area_fix = [], False, False, False, False
+        asked_areas = {k: r["이름"] for k, r in self.idx.s.areas.items() if r.get("이름") and r["이름"] in question}
+        asked_areas = {k: n for k, n in asked_areas.items()  # keep '책장 있는 열람 공간', drop a shorter name inside it
+                       if not any(n != m and n in m for m in asked_areas.values())}
         asked = set(re.findall(r"O\d+", question.upper()))
         for _ in range(self.max_steps):
             text = self._gen(msgs)
@@ -92,6 +102,13 @@ class Agent:
                     msgs += [{"role": "assistant", "content": [{"type": "text", "text": text}]},
                              {"role": "user", "content": [{"type": "text", "text":
                               f"{', '.join(unknown)}은(는) 이 공간에 없는 기호입니다. 도구로 다시 확인해서 답하세요."}]}]
+                    continue
+                miss = self._missed_area(trace, asked_areas)
+                if miss and not area_fix:  # an area named in the question was taken for an object (or not visited)
+                    area_fix = True
+                    msgs += [{"role": "assistant", "content": [{"type": "text", "text": text}]},
+                             {"role": "user", "content": [{"type": "text", "text":
+                              f"'{miss}'은(는) 물체가 아니라 구역 이름입니다. area 인자에 '{miss}'를 그대로 넣어 다시 안내하세요."}]}]
                     continue
                 goal = self._goal(trace)
                 if goal and goal not in text and not named:  # guidance without saying where to
@@ -121,3 +138,15 @@ class Agent:
             if t["tool"] in ("guide_me", "route", "guide_to") and isinstance(r, dict) and isinstance(r.get("goal"), dict):
                 return r["goal"].get("symbol")
         return None
+
+    @staticmethod
+    def _missed_area(trace, asked_areas):
+        """Name of an area in the question when guidance was given but never to that area."""
+        if not asked_areas:
+            return None
+        guided = [t for t in trace if t["tool"] in ("guide_me", "guide_to", "route")]
+        if not guided:
+            return None
+        went = {t["result"]["goal_area"].get("area") for t in guided
+                if isinstance(t["result"], dict) and isinstance(t["result"].get("goal_area"), dict)}
+        return next((name for k, name in asked_areas.items() if k not in went), None)

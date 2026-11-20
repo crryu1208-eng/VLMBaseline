@@ -67,6 +67,7 @@ class Scene:
     keyframes: list[Keyframe]
     camera: dict         # pinhole intrinsics: width, height, fx, fy, cx, cy
     edges: list[tuple[int, int]] = field(repr=False)
+    areas: dict = field(default_factory=dict, repr=False)  # area id -> VLM area description (attach_areas)
 
     def object(self, symbol: str) -> Object:
         return next(o for o in self.objects if o.symbol == symbol)
@@ -99,6 +100,19 @@ def attach_vlm(scene: "Scene", path: str | Path) -> int:
             o.vlm = {k: r[k] for k in ("이름", "라벨_맞음", "색", "재질", "상태", "점검_필요", "점검_이유", "용도", "설명") if k in r}
             n += 1
     return n
+
+
+AREA_KEYS = ("이름", "종류", "설명", "용도", "특징", "places", "center", "neighbours", "shape")
+
+
+def attach_areas(scene: "Scene", path: str | Path) -> int:
+    """Attach the areas and their VLM descriptions (areas_vlm.json, augment/describe_areas.py); returns the count."""
+    p = Path(path)
+    if not p.exists():
+        return 0
+    d = json.loads(p.read_text())
+    scene.areas = {int(k): {kk: r[kk] for kk in AREA_KEYS if kk in r} for k, r in d.items()}
+    return len(scene.areas)
 
 
 def load_export(root: str | Path) -> Scene:
