@@ -302,7 +302,10 @@ class SpatialIndex:
         last = o.center[:2] - pts[-2]
         if h is not None and np.linalg.norm(last) > 0.7:
             g["at_arrival"] = nav.direction_word(nav.rel_angle(h, last))  # side of the goal at the end
-        return {"goal": g, "walking_m": round(walk, 1), "steps": st[:8],
+        off = float(np.linalg.norm(pts[1] - pts[0]))
+        extra = {"off_floor_m": round(off, 1), "warning": "현재 위치가 지도에 있는 바닥에서 멀리 떨어져 있습니다"} \
+            if off > 1.5 else {}
+        return {"goal": g, "walking_m": round(walk, 1), "steps": st[:8], **extra,
                 "note": "steps are turns relative to the user's heading; 'passing' objects are on that side"}
 
     def call(self, name, args):
