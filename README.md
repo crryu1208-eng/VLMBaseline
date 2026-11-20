@@ -37,8 +37,10 @@ Producing and merging scene graphs stays in hydra-observation-ws.
     python -m vlmbaseline.spatial.bench_qa Qwen/Qwen3.5-9B                   # QA / guidance benchmark
     python -m vlmbaseline.spatial.bench_pose Qwen/Qwen3.5-9B                 # guidance from the user's pose
     python -m vlmbaseline.spatial.bench_areas Qwen/Qwen3.5-9B                # questions about areas
+    python -m vlmbaseline.spatial.bench_dialog Qwen/Qwen3.5-9B               # follow-up questions ('거기까지 어떻게 가?')
 
-Try it in a browser (map, set your position / heading by dragging, ask in Korean, see the route):
+Try it in a browser (map, set your position / heading by dragging, ask in Korean, see the route; the page keeps the
+conversation, so follow-ups like '거기까지 어떻게 가?' work, '새 대화' starts over):
 
     python -m vlmbaseline.demo.server            # http://127.0.0.1:8765 (local only); --no-model for the map only
     # http://127.0.0.1:8765/?scene=lab_03&pose=29.8,-23.0,131&q=여기서 가장 가까운 화분까지 어떻게 가?

@@ -25,6 +25,8 @@ SYSTEM = """당신은 실내 공간 안내 도우미입니다. 이 공간의 3D 
 - 구역(복도, 열람 공간, 엘리베이터 앞 등)을 묻거나 구역으로 안내할 때는 areas, area_info, guide_to(area)를 쓰고,
   답에서는 구역 번호 대신 구역 이름으로 부르세요.
 - route, guide_to의 출발 물체는 사용자가 말한 기호여야 합니다. 출발점이나 현재 위치를 모르면 지어내지 말고 사용자에게 어디에 있는지 물어보세요.
+- 앞선 대화가 있으면 '거기', '그거', '그 옆', '다른 거'는 바로 앞 답에서 말한 물체나 구역을 가리킵니다.
+  그 기호나 구역 이름을 그대로 도구 인자로 쓰고, 공간 정보는 이번 질문에 맞게 도구로 다시 확인하세요.
 - 거리는 m 단위입니다. 도구 결과만 근거로 한국어로 짧게 답하세요."""
 
 POSE_RULE = """
@@ -36,6 +38,22 @@ POSE_RULE = """
 - 도구 결과에 warning이 있으면 그 내용을 답 첫머리에 알려 주세요."""
 
 AREA_TOOLS = {"areas", "area_info", "where_am_i"}
+# words that point back to something said earlier in the conversation
+DEIXIS = re.compile(r"거기|그곳|그 곳|그거|그것|그 물체|그 옆|그 근처|그쪽|저기|방금|아까|그 중|그중|다른 거|다른 것|다른 데|또 있")
+HISTORY_TURNS = 3
+WAY = re.compile(r"가는 길|어떻게 가|안내해|데려다|찾아가")  # asks for a walking route
+OTHER = re.compile(r"다른 거|다른 것|다른 데|또 있")
+PROMISE = re.compile(r"(보겠습니다|확인하겠습니다|찾아보겠습니다|드리겠습니다|안내하겠습니다|알려드릴게요)\W*$")
+
+
+def for_model(res):
+    """Tool result as the model sees it: area ids dropped where the area has a name (answers call areas by name)."""
+    if isinstance(res, dict):
+        return {k: for_model(v) for k, v in res.items()
+                if not (k == "area" and isinstance(v, int) and res.get("name"))}
+    if isinstance(res, list):
+        return [for_model(v) for v in res]
+    return res
 
 CALL = re.compile(r"<tool_call>\s*<function=([\w_]+)>(.*?)</function>\s*</tool_call>", re.S)
 PARAM = re.compile(r"<parameter=([\w_]+)>\s*(.*?)\s*</parameter>", re.S)
@@ -73,27 +91,48 @@ class Agent:
                                       eos_token_id=self.eos)
         return prefix + self.proc.tokenizer.decode(out[0, inputs["input_ids"].shape[1]:], skip_special_tokens=True).strip()
 
-    def ask(self, question, pose=None):
-        """pose: (x, y, yaw) of the user now, or None (then guidance needs a start object)."""
+    def ask(self, question, pose=None, history=None):
+        """pose: (x, y, yaw) of the user now, or None (then guidance needs a start object).
+        history: earlier turns of this conversation, [{"q": question, "a": answer}, ...] oldest first;
+        the last HISTORY_TURNS are given to the model as plain text turns (their tool calls are not)."""
         self.idx.pose = pose
         system = self.base + (POSE_RULE if pose is not None else "")
-        msgs = [{"role": "system", "content": [{"type": "text", "text": system}]},
-                {"role": "user", "content": [{"type": "text", "text": question}]}]
-        trace, nudged, checked, named, area_fix = [], False, False, False, False
+        past = [h for h in (history or []) if h.get("q") and h.get("a")][-HISTORY_TURNS:]
+        msgs = [{"role": "system", "content": [{"type": "text", "text": system}]}]
+        for h in past:
+            msgs += [{"role": "user", "content": [{"type": "text", "text": str(h["q"])}]},
+                     {"role": "assistant", "content": [{"type": "text", "text": str(h["a"])}]}]
+        msgs.append({"role": "user", "content": [{"type": "text", "text": question}]})
+        trace, nudged, checked, named, area_fix, way_fix, other_fix = [], False, False, False, False, False, False
+        retried = False
+        before = [x for x in re.findall(r"O\d+", past[-1]["a"]) if x in self.idx.obj] if past else []
         asked_areas = {k: r["이름"] for k, r in self.idx.s.areas.items() if r.get("이름") and r["이름"] in question}
         asked_areas = {k: n for k, n in asked_areas.items()  # keep '책장 있는 열람 공간', drop a shorter name inside it
                        if not any(n != m and n in m for m in asked_areas.values())}
         asked = set(re.findall(r"O\d+", question.upper()))
+        if past and DEIXIS.search(question):  # '거기서 ...': symbols and areas of the turn before count as said
+            asked |= {x for x in re.findall(r"O\d+", past[-1]["q"].upper() + " " + past[-1]["a"]) if x in self.idx.obj}
+            if not asked_areas:
+                asked_areas = {k: r["이름"] for k, r in self.idx.s.areas.items()
+                               if r.get("이름") and r["이름"] in past[-1]["q"]}
         for _ in range(self.max_steps):
             text = self._gen(msgs)
             calls = parse_calls(text)
             if not calls and not trace:  # about to answer without looking: make this turn a tool call
                 text = self._gen(msgs, prefix="<tool_call>\n<function=")
                 calls = parse_calls(text)
-            if not calls and not nudged and re.search(r"(보겠습니다|확인하겠습니다|찾아보겠습니다)\W*$", text):
+            if not calls and not nudged and PROMISE.search(text):
                 nudged = True  # promised to look and stopped: ask once to go on
                 msgs += [{"role": "assistant", "content": [{"type": "text", "text": text}]},
                          {"role": "user", "content": [{"type": "text", "text": "도구를 호출해서 계속 확인하세요."}]}]
+                continue
+            if not calls and trace and not retried and all(
+                    str((t["result"] or {}).get("error", "")).startswith("unknown tool") for t in trace
+                    if isinstance(t["result"], dict)) and all(isinstance(t["result"], dict) for t in trace):
+                retried = True  # only called tools that do not exist: answer is a guess, look again once
+                msgs += [{"role": "assistant", "content": [{"type": "text", "text": text}]},
+                         {"role": "user", "content": [{"type": "text", "text":
+                          "없는 도구를 호출해서 확인하지 못했습니다. 오류에 나온 도구 중에서 골라 다시 확인하세요."}]}]
                 continue
             if not calls:
                 unknown = sorted({x for x in re.findall(r"O\d+", text) if x not in self.idx.obj})
@@ -110,6 +149,28 @@ class Agent:
                              {"role": "user", "content": [{"type": "text", "text":
                               f"'{miss}'은(는) 물체가 아니라 구역 이름입니다. area 인자에 '{miss}'를 그대로 넣어 다시 안내하세요."}]}]
                     continue
+                tools_ran = {t["tool"] for t in trace}
+                if WAY.search(question) and not way_fix and not tools_ran & {"guide_me", "guide_to", "route"} \
+                        and tools_ran & {"nearest", "find", "search", "object_info", "distance", "areas", "area_info",
+                                         "where_am_i", "around_me"}:
+                    way_fix = True  # looked things up but gave no walking route
+                    how = "guide_me" if pose is not None else "route(start, goal) 또는 guide_to"
+                    if asked_areas:
+                        how += f"(area='{next(iter(asked_areas.values()))}')"
+                    msgs += [{"role": "assistant", "content": [{"type": "text", "text": text}]},
+                             {"role": "user", "content": [{"type": "text", "text":
+                              f"걷는 길을 물었습니다. {how}를 호출해서 걷는 길로 안내하세요."}]}]
+                    continue
+                if past and OTHER.search(question) and before and not other_fix:
+                    labs = {self.idx.obj[x].label for x in before}
+                    new = [x for x in re.findall(r"O\d+", text)
+                           if x in self.idx.obj and x not in before and self.idx.obj[x].label in labs]
+                    if not new:  # '다른 거는?': must name another object of the same kind
+                        other_fix = True
+                        msgs += [{"role": "assistant", "content": [{"type": "text", "text": text}]},
+                                 {"role": "user", "content": [{"type": "text", "text":
+                                  f"앞에서 말한 {', '.join(before)} 말고 같은 종류의 다른 물체를 도구로 찾아 기호와 함께 답하세요."}]}]
+                        continue
                 goal = self._goal(trace)
                 if goal and goal not in text and not named:  # guidance without saying where to
                     named = True
@@ -127,7 +188,7 @@ class Agent:
                 else:
                     res = self.idx.call(name, args)
                 trace.append({"tool": name, "args": args, "result": res})
-                msgs.append({"role": "tool", "content": [{"type": "text", "text": json.dumps(res, ensure_ascii=False)}]})
+                msgs.append({"role": "tool", "content": [{"type": "text", "text": json.dumps(for_model(res), ensure_ascii=False)}]})
         return self._gen(msgs + [{"role": "user", "content": [{"type": "text", "text": "도구 결과로 답만 하세요."}]}]), trace
 
     @staticmethod

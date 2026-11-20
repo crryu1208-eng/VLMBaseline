@@ -114,12 +114,12 @@ class Demo:
         return [[round(x, 2), round(y, 2)] for x, y in pts]
 
     # ------------------------------------------------------------ ask
-    def ask(self, name, q, pose):
+    def ask(self, name, q, pose, history=None):
         idx = self.idx[name]
         t = time.perf_counter()
         with self.lock:
             if name in self.agent:
-                ans, trace = self.agent[name].ask(q, pose=pose)
+                ans, trace = self.agent[name].ask(q, pose=pose, history=history)
             else:
                 idx.pose = pose
                 ans, trace = "(모델 없이 실행 중: 도구 결과만 보여줍니다)", self._tools_only(idx, q)
@@ -184,7 +184,9 @@ def make_handler(demo: Demo):
                     return self._send(400, {"error": "scene / question"})
                 pose = req.get("pose")
                 pose = tuple(float(v) for v in pose) if pose else None
-                self._send(200, demo.ask(name, q, pose))
+                hist = [{"q": str(h.get("q", ""))[:300], "a": str(h.get("a", ""))[:1500]}
+                        for h in (req.get("history") or [])[-3:] if isinstance(h, dict)]
+                self._send(200, demo.ask(name, q, pose, hist))
             except Exception as e:  # report to the page instead of dropping the connection
                 self._send(500, {"error": f"{type(e).__name__}: {e}"})
 

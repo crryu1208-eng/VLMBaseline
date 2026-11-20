@@ -86,6 +86,7 @@ def main():
                 q = f"내 {side}에 뭐가 있어?" if side != "앞" else "내 앞에 뭐가 있어?"
                 ans, tr = agent.ask(q, pose=pose)
                 syms = [x for x in re.findall(r"O\d+", ans) if x in idx.obj]
+                good |= {o["symbol"] for o in idx.around_me(side=side)["objects"]}  # all within reach on that side
                 ok = bool(syms) and syms[0] in good
                 rows.append(dict(scene=name, kf=kf.node, kind="around", q=q, gt=sorted(good), answer=ans, ok=ok,
                                  tools=[t["tool"] for t in tr]))

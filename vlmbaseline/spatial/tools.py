@@ -427,7 +427,7 @@ class SpatialIndex:
     def call(self, name, args):
         fn = {t["function"]["name"]: getattr(self, t["function"]["name"]) for t in TOOLS + POSE_TOOLS}
         if name not in fn:
-            return {"error": f"unknown tool {name}"}
+            return {"error": f"unknown tool {name}; 쓸 수 있는 도구: {', '.join(fn)}"}
         try:
             return fn[name](**args)
         except (KeyError, TypeError, ValueError) as e:

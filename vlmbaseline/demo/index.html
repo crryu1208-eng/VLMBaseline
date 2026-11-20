@@ -40,7 +40,13 @@ button:disabled { opacity: .5; cursor: wait; }
 .ex button { font-size: 12.5px; padding: 3px 8px; }
 .answer { white-space: pre-wrap; background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 10px;
           min-height: 48px; }
-.answer .sym { color: var(--cite); font-weight: 600; cursor: pointer; }
+.log .sym { color: var(--cite); font-weight: 600; cursor: pointer; }
+.log { display: flex; flex-direction: column; gap: 8px; }
+.log .uq { align-self: flex-end; max-width: 85%; background: var(--cite); color: #fff; border-radius: 10px 10px 2px 10px;
+           padding: 6px 10px; white-space: pre-wrap; }
+.log .ua { white-space: pre-wrap; background: var(--bg); border: 1px solid var(--line); border-radius: 10px 10px 10px 2px;
+           padding: 8px 10px; }
+.log .ua.old { opacity: .7; }
 details { border: 1px solid var(--line); border-radius: 8px; padding: 6px 10px; }
 details pre { white-space: pre-wrap; font-size: 11.5px; max-height: 320px; overflow: auto; margin: 6px 0 0; }
 #card { position: fixed; pointer-events: none; background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
@@ -72,10 +78,11 @@ details pre { white-space: pre-wrap; font-size: 11.5px; max-height: 320px; overf
         <button id="clear">지우기</button></div>
       <div class="muted">지도를 누른 채 끌면 위치와 바라보는 방향이 정해집니다. 확대·축소: 휠 또는 ＋/－, 이동: 오른쪽 버튼(또는 Shift)으로 끌기, 휴대폰은 ✋ 버튼을 켜고 끌기.</div>
     </div>
-    <textarea id="q" placeholder="예: 여기서 가장 가까운 화분까지 어떻게 가?"></textarea>
-    <div class="row"><button class="primary" id="ask">질문하기</button><span class="muted" id="time"></span></div>
+    <div class="log" id="log"></div>
+    <textarea id="q" placeholder="예: 여기서 가장 가까운 화분까지 어떻게 가? (이어서 '거기까지 어떻게 가?'처럼 물어도 됩니다)"></textarea>
+    <div class="row"><button class="primary" id="ask">질문하기</button><button id="newchat">새 대화</button>
+      <span class="muted" id="time"></span></div>
     <div class="ex" id="examples"></div>
-    <div class="answer" id="answer"></div>
     <details><summary>도구 호출과 계산 결과</summary><pre id="trace"></pre></details>
     <div class="legend muted">
       <span><i style="background:var(--obj)"></i>물체</span>
@@ -88,10 +95,11 @@ details pre { white-space: pre-wrap; font-size: 11.5px; max-height: 320px; overf
 </div>
 <div id="card"></div>
 <script>
-const EX = ["지금 여기가 어디야?", "이 층에는 어떤 공간들이 있어?", "여기서 가장 가까운 화분까지 어떻게 가?", "내 왼쪽에 뭐가 있어?", "내 앞에 뭐가 있어?", "의자는 몇 개 있어?",
+const EX = ["지금 여기가 어디야?", "거기까지 어떻게 가?", "그 옆에 뭐가 있어?", "이 층에는 어떤 공간들이 있어?", "여기서 가장 가까운 화분까지 어떻게 가?", "내 왼쪽에 뭐가 있어?", "내 앞에 뭐가 있어?", "의자는 몇 개 있어?",
             "앉아서 쉴 수 있는 곳은 어디 있어?", "이 공간에서 정리하거나 점검하면 좋을 일 3가지 추천해줘.", "콘센트는 어디 있어?"];
 const $ = id => document.getElementById(id);
 const cv = $("map"), ctx = cv.getContext("2d");
+let hist = [];  // this conversation: [{q, a}], the last 3 go to the server
 let S = null, pose = null, route = null, goalArea = null, areaOf = {}, cited = new Set(), view = {s: 20, x: 0, y: 0}, hover = null;
 const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
 const dark = () => matchMedia("(prefers-color-scheme: dark)").matches;
@@ -221,31 +229,39 @@ async function loadScene(name) {
   $("status").textContent = "불러오는 중…";
   S = await (await fetch(`/api/scene?name=${encodeURIComponent(name)}`)).json();
   areaOf = {}; for (const a of S.areas || []) for (const p of a.places) areaOf[p] = a.id;
-  pose = null; route = null; goalArea = null; cited = new Set(); showPose(); home(); fit();
+  pose = null; route = null; goalArea = null; cited = new Set(); newChat(); showPose(); home(); fit();
   $("status").textContent = `물체 ${S.objects.length}개, 장소 ${S.places.length}개`;
 }
 $("scene").onchange = e => loadScene(e.target.value);
 
+function newChat() { hist = []; $("log").innerHTML = ""; $("trace").textContent = ""; $("time").textContent = ""; }
+$("newchat").onclick = () => { newChat(); route = null; goalArea = null; cited = new Set(); draw(); };
+function bubble(cls, html) { const d = document.createElement("div"); d.className = cls; d.innerHTML = html;
+                             $("log").appendChild(d); d.scrollIntoView({block: "nearest"}); return d; }
 async function ask() {
   const q = $("q").value.trim();
   if (!q) return;
-  $("ask").disabled = true; $("answer").textContent = "생각하는 중…"; $("trace").textContent = ""; $("time").textContent = "";
+  $("ask").disabled = true; $("q").value = ""; $("trace").textContent = ""; $("time").textContent = "";
+  for (const e of $("log").querySelectorAll(".ua")) e.classList.add("old");
+  bubble("uq", esc(q));
+  const out = bubble("ua", "생각하는 중…");
   try {
     const r = await fetch("/api/ask", {method: "POST", headers: {"Content-Type": "application/json"},
-                                       body: JSON.stringify({scene: S.name, q, pose})});
+                                       body: JSON.stringify({scene: S.name, q, pose, history: hist.slice(-3)})});
     const d = await r.json();
     if (d.error) throw new Error(d.error);
+    hist.push({q, a: d.answer});
     cited = new Set(d.cited); route = d.route; goalArea = d.goal_area ?? null;
-    $("answer").innerHTML = esc(d.answer).replace(/\*\*(.+?)\*\*/g, "<b>$1</b>").replace(/O\d+/g, m => cited.has(m) ? `<span class="sym" data-s="${m}">${m}</span>` : m);
+    out.innerHTML = esc(d.answer).replace(/\*\*(.+?)\*\*/g, "<b>$1</b>").replace(/O\d+/g, m => cited.has(m) ? `<span class="sym" data-s="${m}">${m}</span>` : m);
     $("trace").textContent = d.trace.map(t => `▶ ${t.tool}(${JSON.stringify(t.args)})\n${JSON.stringify(t.result, null, 1)}`).join("\n\n");
     $("time").textContent = `${d.sec}초` + (d.warning ? ` · 주의: ${d.warning}` : "");
     draw();
-  } catch (e) { $("answer").textContent = "오류: " + e.message; }
+  } catch (e) { out.textContent = "오류: " + e.message; }
   $("ask").disabled = false;
 }
 $("ask").onclick = ask;
 $("q").addEventListener("keydown", e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); ask(); } });
-$("answer").addEventListener("click", e => {
+$("log").addEventListener("click", e => {
   const s = e.target.dataset && e.target.dataset.s, o = s && S.objects.find(x => x.sym === s);
   if (o) { view.x = o.c[0]; view.y = o.c[1]; draw(); }
 });
