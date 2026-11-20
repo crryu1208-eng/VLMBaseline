@@ -15,6 +15,7 @@ from collections import Counter, defaultdict
 import numpy as np
 
 from vlmbaseline.scene import Scene
+from vlmbaseline.spatial import nav
 from vlmbaseline.spatial.search import rank
 
 # visible states that call for an action (augment/describe_objects.py STATES); other states are normal
@@ -48,6 +49,14 @@ class SpatialIndex:
         for o in scene.objects:
             self.on_place[o.place].append(o)
         self.labels = Counter(o.label for o in scene.objects)
+        self.pose = None  # (x, y, yaw) of the user, set by set_pose(); enables around_me / guide_me
+
+    def set_pose(self, x, y, yaw):
+        """User position (m, world) and heading (radians from the world x axis)."""
+        self.pose = (float(x), float(y), float(yaw))
+
+    def set_pose_from_keyframe(self, kf):
+        self.pose = nav.pose_from_T(kf.world_T_sensor)
 
     # ---------------------------------------------------------------- helpers
     def _o(self, sym):
@@ -86,6 +95,31 @@ class SpatialIndex:
                     dist[v], prev[v] = d + w, u
                     heapq.heappush(pq, (d + w, v))
         return dist, prev
+
+    def _path(self, prev, a, b):
+        path, u = [b], b
+        while u != a:
+            u = prev[u]
+            path.append(u)
+        return path[::-1]
+
+    def _pose_place(self):
+        """Graph place closest to the user (only places with edges, so routes exist)."""
+        x, y, _ = self.pose
+        ids = [p for p in self.adj]
+        c = np.array([self.place[p].center[:2] for p in ids])
+        return ids[int(np.linalg.norm(c - [x, y], axis=1).argmin())]
+
+    def _rel(self, o):
+        x, y, yaw = self.pose
+        v = o.center[:2] - [x, y]
+        a = nav.rel_angle(yaw, v)
+        return {"direction": nav.direction_word(a), "clock": nav.clock(a),
+                "dist_m": round(float(np.linalg.norm(v)), 1)}
+
+    def _need_pose(self):
+        if self.pose is None:
+            raise ValueError("현재 위치를 모릅니다. 출발 물체의 기호가 필요합니다.")
 
     # ---------------------------------------------------------------- tools
     def list_labels(self):
@@ -207,8 +241,72 @@ class SpatialIndex:
             return {"start": start, "label": label, "error": "no such object"}
         return self.route(start, n[0]["symbol"])
 
+    SIDES = {"앞": {"앞", "왼쪽 앞", "오른쪽 앞"}, "왼쪽": {"왼쪽", "왼쪽 앞", "왼쪽 뒤"},
+             "오른쪽": {"오른쪽", "오른쪽 앞", "오른쪽 뒤"}, "뒤": {"뒤", "왼쪽 뒤", "오른쪽 뒤"}}
+
+    def around_me(self, label=None, side=None, k=8, radius=4.0):
+        """Objects around the user with direction relative to the heading (앞, 왼쪽, 오른쪽 뒤 ...);
+        side (앞 / 왼쪽 / 오른쪽 / 뒤) keeps only the objects on that side."""
+        self._need_pose()
+        if side and side not in self.SIDES:
+            raise ValueError(f"side must be one of {list(self.SIDES)}")
+        x, y, _ = self.pose
+        objs = self._match(label) if label else [o for o in self.s.objects if o.label not in SKIP_LANDMARK]
+        objs = sorted(objs, key=lambda o: np.linalg.norm(o.center[:2] - [x, y]))
+        out = []
+        for o in objs:
+            r = self._rel(o)
+            if r["dist_m"] > float(radius) and out:
+                break
+            if side and r["direction"] not in self.SIDES[side]:
+                continue
+            b = {"symbol": o.symbol, "label": o.label}
+            if o.vlm and o.vlm.get("이름"):
+                b["name"] = o.vlm["이름"]
+            b.update(r)
+            out.append(b)
+            if len(out) >= int(k):
+                break
+        if side and not out:
+            return {"side": side, "objects": [], "note": f"{radius} m 안에서 {side}쪽에 있는 물체가 없습니다"}
+        return {"objects": out}
+
+    def guide_me(self, label=None, goal=None):
+        """Turn-by-turn directions from the user's pose to an object (goal symbol) or the nearest object of a
+        label by walking distance."""
+        self._need_pose()
+        src = self._pose_place()
+        dist, prev = self._dijkstra(src)
+        if goal:
+            o = self._o(goal)
+        elif label:
+            cand = [c for c in self._match(label) if c.place in dist]
+            if not cand:
+                return {"label": label, "error": "no reachable object with this label"}
+            o = min(cand, key=lambda c: dist[c.place])
+        else:
+            raise ValueError("label or goal is needed")
+        if o.place not in dist:
+            return {"goal": o.symbol, "reachable": False}
+        x, y, yaw = self.pose
+        path = self._path(prev, src, o.place)
+        pts = np.vstack([[x, y]] + [self.place[p].center[:2] for p in path] + [o.center[:2]])
+        lm = [(c.symbol, c.label, (c.vlm or {}).get("이름"), c.center[:2], float(np.prod(c.size)))
+              for c in self.s.objects if c is not o and c.label not in SKIP_LANDMARK and c.label != o.label]
+        st, h = nav.steps(pts[:-1], yaw, lm)
+        walk = float(np.linalg.norm(pts[1] - pts[0])) + dist[o.place]
+        g = self._brief(o)
+        g.pop("xy", None)
+        g.pop("top_z", None)
+        g["now"] = self._rel(o)  # where the goal is from the user now
+        last = o.center[:2] - pts[-2]
+        if h is not None and np.linalg.norm(last) > 0.7:
+            g["at_arrival"] = nav.direction_word(nav.rel_angle(h, last))  # side of the goal at the end
+        return {"goal": g, "walking_m": round(walk, 1), "steps": st[:8],
+                "note": "steps are turns relative to the user's heading; 'passing' objects are on that side"}
+
     def call(self, name, args):
-        fn = {t["function"]["name"]: getattr(self, t["function"]["name"]) for t in TOOLS}
+        fn = {t["function"]["name"]: getattr(self, t["function"]["name"]) for t in TOOLS + POSE_TOOLS}
         if name not in fn:
             return {"error": f"unknown tool {name}"}
         try:
@@ -251,4 +349,17 @@ TOOLS = [
        start=dict(S, description="start object symbol"), label=dict(S, description="English label of the goal")),
     _t("route", "Walking route from one object to another: length and landmarks passed on the way.",
        start=dict(S, description="start object symbol"), goal=dict(S, description="goal object symbol")),
+]
+
+POSE_TOOLS = [
+    _t("guide_me", "Guidance from where the user is now (their position and facing direction are known): "
+       "turn-by-turn steps (turn, walk m, objects passed on the left / right). Use for '여기서 X까지 어떻게 가?', "
+       "'가장 가까운 X로 안내해줘' when no start object is given.",
+       label={"type": "string", "description": "English label of the goal (nearest by walking)", "optional": True},
+       goal={"type": "string", "description": "goal object symbol", "optional": True}),
+    _t("around_me", "Objects around the user now, with direction relative to where they face (앞, 왼쪽, 오른쪽 뒤, "
+       "clock 12 = ahead) and distance. Use for '내 앞에/왼쪽에 뭐 있어?', '근처에 X 있어?'.",
+       label={"type": "string", "description": "only this English label (optional)", "optional": True},
+       side={"type": "string", "enum": ["앞", "왼쪽", "오른쪽", "뒤"],
+             "description": "only objects on this side of the user (optional)", "optional": True}),
 ]

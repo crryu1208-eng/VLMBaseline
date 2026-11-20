@@ -15,7 +15,8 @@ Producing and merging scene graphs stays in hydra-observation-ws.
 
     vlmbaseline/scene/    export loader (pure Python + numpy, no spark_dsg), best keyframe views of an object
     vlmbaseline/augment/  VLM descriptions of every object, written into the graph (metadata.vlm)
-    vlmbaseline/spatial/  spatial tools (count, nearest, distances, routes, search), tool-using QA / guidance agent
+    vlmbaseline/spatial/  spatial tools (count, nearest, distances, routes, search, turn-by-turn from the user's pose),
+                      tool-using QA / guidance agent
     vlmbaseline/bench/    VLM benchmark (object naming, descriptions, scene QA)
     docs/                 export format, design notes
     tests/
@@ -32,6 +33,10 @@ Producing and merging scene graphs stays in hydra-observation-ws.
     python -m vlmbaseline.augment.describe_objects data/library_merged      # ~4 s per object (Qwen3.5-9B, 4-bit)
     python -m vlmbaseline.augment.write_dsg data/library_merged
     python -m vlmbaseline.spatial.bench_qa Qwen/Qwen3.5-9B                   # QA / guidance benchmark
+    python -m vlmbaseline.spatial.bench_pose Qwen/Qwen3.5-9B                 # guidance from the user's pose
+
+In code: `Agent(proc, model, SpatialIndex(scene)).ask("여기서 가장 가까운 화분까지 어떻게 가?", pose=(x, y, yaw))`;
+without `pose`, guidance needs a start object named in the question.
 
 Results: [docs/bench_2026-11-19.md](docs/bench_2026-11-19.md).
 

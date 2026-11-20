@@ -10,7 +10,7 @@ import re
 
 import torch
 
-from vlmbaseline.spatial.tools import TOOLS, SpatialIndex
+from vlmbaseline.spatial.tools import POSE_TOOLS, TOOLS, SpatialIndex
 
 SYSTEM = """당신은 실내 공간 안내 도우미입니다. 이 공간의 3D 씬그래프를 도구로 조회할 수 있습니다.
 - 물체의 개수, 위치, 거리, 경로, 크기 같은 공간 정보는 추측하지 말고 반드시 도구로 확인하세요.
@@ -22,7 +22,14 @@ SYSTEM = """당신은 실내 공간 안내 도우미입니다. 이 공간의 3D 
 - 씬그래프에 없는 정보(콘센트, 와이파이, 온도, 운영 시간, 지금 있는 사람 수, 물건의 내부 상태 등)는 추측하지 말고
   '씬그래프로는 확인할 수 없습니다'라고 답하세요. 물체의 상태는 촬영 당시 기준입니다.
 - 도구 결과의 영어 필드 이름(needs_check 등)이나 null을 답에 그대로 쓰지 마세요.
+- route, guide_to의 출발 물체는 사용자가 말한 기호여야 합니다. 출발점이나 현재 위치를 모르면 지어내지 말고 사용자에게 어디에 있는지 물어보세요.
 - 거리는 m 단위입니다. 도구 결과만 근거로 한국어로 짧게 답하세요."""
+
+POSE_RULE = """
+- 사용자의 현재 위치와 바라보는 방향을 알고 있습니다. '여기서', '나', '지금' 기준의 길 안내는 guide_me를,
+  주변·앞·왼쪽·오른쪽·뒤에 무엇이 있는지는 around_me를 호출하세요(특정 방향이면 side 인자를 쓰고, 결과에 있는 물체만 답하세요).
+- guide_me의 steps를 순서대로 '(회전) 후 약 N m, 왼쪽/오른쪽에 (물체)를 지나' 식으로 안내하고, 마지막에 목적지가 어느 쪽인지 말하세요.
+  방향(앞, 왼쪽, 오른쪽, 뒤, N시 방향)은 도구 결과 그대로 쓰고 바꾸지 마세요."""
 
 CALL = re.compile(r"<tool_call>\s*<function=([\w_]+)>(.*?)</function>\s*</tool_call>", re.S)
 PARAM = re.compile(r"<parameter=([\w_]+)>\s*(.*?)\s*</parameter>", re.S)
@@ -42,14 +49,15 @@ def parse_calls(text):
 class Agent:
     def __init__(self, proc, model, index: SpatialIndex, max_steps=5):
         self.proc, self.model, self.idx, self.max_steps = proc, model, index, max_steps
-        self.system = SYSTEM.format(labels=", ".join(sorted(index.labels)))
+        self.base = SYSTEM.format(labels=", ".join(sorted(index.labels)))
         tok = proc.tokenizer
         ends = [t for t in ("<|im_end|>", "<|endoftext|>", "<end_of_turn>", "<eos>") if t in tok.get_vocab()]
         self.eos = [tok.convert_tokens_to_ids(t) for t in ends] or None
 
     def _gen(self, msgs, max_new_tokens=384, prefix=""):
         """Generate the next assistant turn; `prefix` is forced as its start (e.g. '<tool_call>')."""
-        text = self.proc.apply_chat_template(msgs, tools=TOOLS, add_generation_prompt=True, tokenize=False,
+        tools = TOOLS + POSE_TOOLS if self.idx.pose is not None else TOOLS
+        text = self.proc.apply_chat_template(msgs, tools=tools, add_generation_prompt=True, tokenize=False,
                                              enable_thinking=False) + prefix
         inputs = self.proc.tokenizer(text, return_tensors="pt", add_special_tokens=False).to(self.model.device)
         with torch.inference_mode():
@@ -57,10 +65,14 @@ class Agent:
                                       eos_token_id=self.eos)
         return prefix + self.proc.tokenizer.decode(out[0, inputs["input_ids"].shape[1]:], skip_special_tokens=True).strip()
 
-    def ask(self, question):
-        msgs = [{"role": "system", "content": [{"type": "text", "text": self.system}]},
+    def ask(self, question, pose=None):
+        """pose: (x, y, yaw) of the user now, or None (then guidance needs a start object)."""
+        self.idx.pose = pose
+        system = self.base + (POSE_RULE if pose is not None else "")
+        msgs = [{"role": "system", "content": [{"type": "text", "text": system}]},
                 {"role": "user", "content": [{"type": "text", "text": question}]}]
-        trace, nudged, checked = [], False, False
+        trace, nudged, checked, named = [], False, False, False
+        asked = set(re.findall(r"O\d+", question.upper()))
         for _ in range(self.max_steps):
             text = self._gen(msgs)
             calls = parse_calls(text)
@@ -80,10 +92,31 @@ class Agent:
                              {"role": "user", "content": [{"type": "text", "text":
                               f"{', '.join(unknown)}은(는) 이 공간에 없는 기호입니다. 도구로 다시 확인해서 답하세요."}]}]
                     continue
+                goal = self._goal(trace)
+                if goal and goal not in text and not named:  # guidance without saying where to
+                    named = True
+                    msgs += [{"role": "assistant", "content": [{"type": "text", "text": text}]},
+                             {"role": "user", "content": [{"type": "text", "text":
+                              f"목적지 기호({goal})를 넣어서 같은 안내를 다시 답하세요."}]}]
+                    continue
                 return text, trace
             msgs.append({"role": "assistant", "content": [{"type": "text", "text": text}]})
             for name, args in calls:
-                res = self.idx.call(name, args)
+                st = str(args.get("start", "")).strip().upper()
+                if name in ("route", "guide_to") and st not in asked:
+                    res = {"error": f"출발 물체 {st or '(없음)'}는 사용자가 말하지 않았습니다. 사용자의 현재 위치를 모르면 "
+                                    "어디(어느 물체 앞)에 있는지 물어보세요."}
+                else:
+                    res = self.idx.call(name, args)
                 trace.append({"tool": name, "args": args, "result": res})
                 msgs.append({"role": "tool", "content": [{"type": "text", "text": json.dumps(res, ensure_ascii=False)}]})
         return self._gen(msgs + [{"role": "user", "content": [{"type": "text", "text": "도구 결과로 답만 하세요."}]}]), trace
+
+    @staticmethod
+    def _goal(trace):
+        """Goal symbol of the last guidance tool result, if any."""
+        for t in reversed(trace):
+            r = t["result"]
+            if t["tool"] in ("guide_me", "route", "guide_to") and isinstance(r, dict) and isinstance(r.get("goal"), dict):
+                return r["goal"].get("symbol")
+        return None
