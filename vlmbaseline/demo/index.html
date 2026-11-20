@@ -47,6 +47,10 @@ button:disabled { opacity: .5; cursor: wait; }
 .log .ua { white-space: pre-wrap; background: var(--bg); border: 1px solid var(--line); border-radius: 10px 10px 10px 2px;
            padding: 8px 10px; }
 .log .ua.old { opacity: .7; }
+.log .sys { align-self: center; max-width: 92%; font-size: 13px; background: var(--goal); color: var(--ink);
+            border-radius: 8px; padding: 5px 10px; }
+.walk { border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; display: none; flex-direction: column; gap: 6px; }
+.walk.on { display: flex; }
 details { border: 1px solid var(--line); border-radius: 8px; padding: 6px 10px; }
 details pre { white-space: pre-wrap; font-size: 11.5px; max-height: 320px; overflow: auto; margin: 6px 0 0; }
 #card { position: fixed; pointer-events: none; background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
@@ -79,6 +83,12 @@ details pre { white-space: pre-wrap; font-size: 11.5px; max-height: 320px; overf
       <div class="muted">지도를 누른 채 끌면 위치와 바라보는 방향이 정해집니다. 확대·축소: 휠 또는 ＋/－, 이동: 오른쪽 버튼(또는 Shift)으로 끌기, 휴대폰은 ✋ 버튼을 켜고 끌기.</div>
     </div>
     <div class="log" id="log"></div>
+    <div class="walk" id="walk">
+      <div class="row"><b>걸으며 안내</b> <span id="walkinfo" class="muted"></span></div>
+      <div class="row"><button id="play">걸어 보기</button><button id="stopwalk">멈춤</button>
+        <label class="muted"><input type="checkbox" id="voice"> 음성</label></div>
+      <div class="muted">지도에서 내 위치를 옮기면 그 위치에 맞춰 안내합니다.</div>
+    </div>
     <textarea id="q" placeholder="예: 여기서 가장 가까운 화분까지 어떻게 가? (이어서 '거기까지 어떻게 가?'처럼 물어도 됩니다)"></textarea>
     <div class="row"><button class="primary" id="ask">질문하기</button><button id="newchat">새 대화</button>
       <span class="muted" id="time"></span></div>
@@ -184,7 +194,7 @@ cv.addEventListener("pointerdown", e => {
   drag = e.button === 2 || e.shiftKey || panMode ? {pan: true, u, v, x: view.x, y: view.y} : {pan: false, w: S2W(u, v)};
   if (!drag.pan) { pose = [drag.w[0], drag.w[1], pose ? pose[2] : 0]; showPose(); draw(); }
 });
-cv.addEventListener("pointerup", () => { drag = null; });
+cv.addEventListener("pointerup", () => { const moved = drag && !drag.pan; drag = null; if (moved && walking) followStep(); });
 cv.addEventListener("pointercancel", () => { drag = null; });
 cv.addEventListener("pointermove", e => {
   const r = cv.getBoundingClientRect(), u = e.clientX - r.left, v = e.clientY - r.top;
@@ -234,7 +244,7 @@ async function loadScene(name) {
 }
 $("scene").onchange = e => loadScene(e.target.value);
 
-function newChat() { hist = []; $("log").innerHTML = ""; $("trace").textContent = ""; $("time").textContent = ""; }
+function newChat() { setWalk(null); hist = []; $("log").innerHTML = ""; $("trace").textContent = ""; $("time").textContent = ""; }
 $("newchat").onclick = () => { newChat(); route = null; goalArea = null; cited = new Set(); draw(); };
 function bubble(cls, html) { const d = document.createElement("div"); d.className = cls; d.innerHTML = html;
                              $("log").appendChild(d); d.scrollIntoView({block: "nearest"}); return d; }
@@ -252,6 +262,7 @@ async function ask() {
     if (d.error) throw new Error(d.error);
     hist.push({q, a: d.answer});
     cited = new Set(d.cited); route = d.route; goalArea = d.goal_area ?? null;
+    setWalk(d.follow);
     out.innerHTML = esc(d.answer).replace(/\*\*(.+?)\*\*/g, "<b>$1</b>").replace(/O\d+/g, m => cited.has(m) ? `<span class="sym" data-s="${m}">${m}</span>` : m);
     $("trace").textContent = d.trace.map(t => `▶ ${t.tool}(${JSON.stringify(t.args)})\n${JSON.stringify(t.result, null, 1)}`).join("\n\n");
     $("time").textContent = `${d.sec}초` + (d.warning ? ` · 주의: ${d.warning}` : "");
@@ -259,6 +270,47 @@ async function ask() {
   } catch (e) { out.textContent = "오류: " + e.message; }
   $("ask").disabled = false;
 }
+// ---------------------------------------------------------------- guidance while walking
+let walking = null, timer = null;
+function setWalk(f) {
+  stopPlay(); walking = f || null;
+  $("walk").classList.toggle("on", !!walking);
+  if (walking) { if (walking.route) route = walking.route; $("walkinfo").textContent = `${walking.goal}까지 ${walking.remaining_m} m`; }
+}
+function speak(t) {
+  if (!$("voice").checked || !("speechSynthesis" in window)) return;
+  const u = new SpeechSynthesisUtterance(t.replace(/\(O\d+\)/g, "")); u.lang = "ko-KR"; speechSynthesis.speak(u);
+}
+async function followStep() {
+  if (!walking || !pose) return null;
+  const r = await (await fetch("/api/follow", {method: "POST", headers: {"Content-Type": "application/json"},
+                                               body: JSON.stringify({scene: S.name, pose})})).json();
+  if (r.error) { bubble("sys", esc(r.error)); stopPlay(); return null; }
+  for (const t of r.say) { bubble("sys", esc(t)); speak(t); }
+  if (r.rerouted) route = r.route;
+  $("walkinfo").textContent = r.arrived ? "도착" : `남은 거리 ${r.remaining_m} m` + (r.next ? ` · ${r.next.in_m} m 뒤 ${r.next.turn}` : "");
+  if (r.arrived) stopPlay();
+  return r;
+}
+function stopPlay() { if (timer) clearInterval(timer); timer = null; }
+$("stopwalk").onclick = stopPlay;
+$("play").onclick = () => {
+  // walk along the route from the nearest point: 0.5 m per step, two steps a second
+  if (!walking || !route || !pose) return;
+  stopPlay();
+  const pts = [];
+  for (let i = 0; i + 1 < route.length; i++) {
+    const [a, b] = [route[i], route[i + 1]], L = Math.hypot(b[0] - a[0], b[1] - a[1]), yaw = Math.atan2(b[1] - a[1], b[0] - a[0]);
+    for (let t = 0; t < L; t += 0.5) pts.push([a[0] + (b[0] - a[0]) * t / L, a[1] + (b[1] - a[1]) * t / L, yaw]);
+  }
+  pts.push([...route[route.length - 1], pts.length ? pts[pts.length - 1][2] : pose[2]]);
+  let k = pts.reduce((bi, p, i) => Math.hypot(p[0] - pose[0], p[1] - pose[1]) < Math.hypot(pts[bi][0] - pose[0], pts[bi][1] - pose[1]) ? i : bi, 0);
+  timer = setInterval(async () => {
+    if (k >= pts.length) { stopPlay(); return; }
+    pose = pts[k++]; showPose(); draw();
+    await followStep();
+  }, 500);
+};
 $("ask").onclick = ask;
 $("q").addEventListener("keydown", e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); ask(); } });
 $("log").addEventListener("click", e => {
@@ -273,13 +325,13 @@ addEventListener("resize", fit);
   const d = await (await fetch("/api/scenes")).json();
   for (const n of d.scenes) { const o = document.createElement("option"); o.value = o.textContent = n; $("scene").appendChild(o); }
   if (!d.model) $("status").textContent = "모델 없이 실행 중";
-  // ?scene=lab_03&pose=x,y,heading_deg&q=question opens that case (and asks it)
+  // ?scene=lab_03&pose=x,y,heading_deg&q=question opens that case (and asks it); &walk=1 then walks the route
   const P = new URLSearchParams(location.search), sc = P.get("scene");
   if (sc && d.scenes.includes(sc)) $("scene").value = sc;
   await loadScene($("scene").value);
   const pp = (P.get("pose") || "").split(",").map(Number);
   if (pp.length === 3 && pp.every(isFinite)) { pose = [pp[0], pp[1], pp[2] * Math.PI / 180]; showPose(); draw(); }
-  if (P.get("q")) { $("q").value = P.get("q"); ask(); }
+  if (P.get("q")) { $("q").value = P.get("q"); await ask(); if (P.get("walk") && walking) $("play").click(); }
 })();
 </script>
 </body>

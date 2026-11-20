@@ -21,6 +21,7 @@ import numpy as np
 
 from vlmbaseline.scene import attach_areas, attach_vlm, load_export
 from vlmbaseline.spatial import nav
+from vlmbaseline.spatial.follow import Follower
 from vlmbaseline.spatial.tools import SpatialIndex
 
 HERE = Path(__file__).parent
@@ -48,6 +49,7 @@ class Demo:
             if model is not None:
                 from vlmbaseline.spatial.agent import Agent
                 self.agent[name] = Agent(proc, model, self.idx[name])
+        self.follow = {}  # scene -> Follower of the last guidance from the user's pose
         self.lock = threading.Lock()  # one GPU, one question at a time
 
     # ------------------------------------------------------------ map data
@@ -134,8 +136,38 @@ class Demo:
         warn = next((tr["result"]["warning"] for tr in trace
                      if isinstance(tr.get("result"), dict) and tr["result"].get("warning")), None)
         cited = [x for x in dict.fromkeys(re.findall(r"O\d+", ans)) if x in idx.obj]
+        follow = self._start_follow(name, trace, pose)
         return {"answer": ans, "trace": trace, "route": route, "cited": cited, "warning": warn, "goal_area": goal_area,
-                "sec": round(time.perf_counter() - t, 1)}
+                "follow": follow, "sec": round(time.perf_counter() - t, 1)}
+
+    # ------------------------------------------------------------ guidance while walking
+    def _start_follow(self, name, trace, pose):
+        """After guidance from the user's pose, keep a Follower so pose updates get announcements."""
+        self.follow.pop(name, None)
+        if pose is None:
+            return None
+        for tr in reversed(trace):
+            r = tr.get("result")
+            if tr["tool"] != "guide_me" or not isinstance(r, dict) or "error" in r:
+                continue
+            if isinstance(r.get("goal"), dict) and r["goal"].get("symbol"):
+                f = Follower(self.idx[name], goal=r["goal"]["symbol"])
+            elif isinstance(r.get("goal_area"), dict):
+                f = Follower(self.idx[name], area=r["goal_area"]["area"])
+            else:
+                continue
+            with self.lock:
+                st = f.start(pose)
+            self.follow[name] = f
+            return {"goal": f.name, "route": st["route"], "remaining_m": st["remaining_m"]}
+        return None
+
+    def follow_update(self, name, pose):
+        f = self.follow.get(name)
+        if f is None:
+            return {"error": "길 안내를 먼저 받아야 합니다"}
+        with self.lock:
+            return f.update(pose)
 
     @staticmethod
     def _tools_only(idx, q):
@@ -175,7 +207,17 @@ def make_handler(demo: Demo):
             self._send(404, {"error": "not found"})
 
         def do_POST(self):
-            if urlparse(self.path).path != "/api/ask":
+            path = urlparse(self.path).path
+            if path == "/api/follow":
+                try:
+                    req = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
+                    if req.get("scene") not in demo.idx:
+                        return self._send(400, {"error": "scene"})
+                    pose = tuple(float(v) for v in req["pose"])
+                    return self._send(200, demo.follow_update(req["scene"], pose))
+                except Exception as e:
+                    return self._send(500, {"error": f"{type(e).__name__}: {e}"})
+            if path != "/api/ask":
                 return self._send(404, {"error": "not found"})
             try:
                 req = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
