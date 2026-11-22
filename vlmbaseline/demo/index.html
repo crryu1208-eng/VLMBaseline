@@ -245,7 +245,9 @@ async function loadScene(name) {
 }
 $("scene").onchange = e => loadScene(e.target.value);
 
-function newChat() { setWalk(null); hist = []; $("log").innerHTML = ""; $("trace").textContent = ""; $("time").textContent = ""; }
+function newChat() {
+  if (walking && S) fetch("/api/follow_stop", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({scene: S.name})});
+  setWalk(null); hist = []; $("log").innerHTML = ""; $("trace").textContent = ""; $("time").textContent = ""; }
 $("newchat").onclick = () => { newChat(); route = null; goalArea = null; cited = new Set(); draw(); };
 function bubble(cls, html) { const d = document.createElement("div"); d.className = cls; d.innerHTML = html;
                              $("log").appendChild(d); d.scrollIntoView({block: "nearest"}); return d; }
@@ -263,7 +265,7 @@ async function ask() {
     if (d.error) throw new Error(d.error);
     hist.push({q, a: d.answer});
     cited = new Set(d.cited); route = d.route; goalArea = d.goal_area ?? null;
-    setWalk(d.follow);
+    if (d.follow) setWalk(d.follow);  // another question while walking keeps the guidance
     out.innerHTML = esc(d.answer).replace(/\*\*(.+?)\*\*/g, "<b>$1</b>").replace(/O\d+/g, m => cited.has(m) ? `<span class="sym" data-s="${m}">${m}</span>` : m);
     $("trace").textContent = d.trace.map(t => `▶ ${t.tool}(${JSON.stringify(t.args)})\n${JSON.stringify(t.result, null, 1)}`).join("\n\n");
     $("time").textContent = `${d.sec}초` + (d.warning ? ` · 주의: ${d.warning}` : "");

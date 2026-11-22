@@ -144,8 +144,8 @@ class Demo:
 
     # ------------------------------------------------------------ guidance while walking
     def _start_follow(self, name, trace, pose):
-        """After guidance from the user's pose, keep a Follower so pose updates get announcements."""
-        self.follow.pop(name, None)
+        """After guidance from the user's pose, keep a Follower so pose updates get announcements. Any other answer
+        (a question asked while walking, '그 옆에 뭐가 있어?') leaves the current guidance running."""
         if pose is None:
             return None
         for tr in reversed(trace):
@@ -161,8 +161,16 @@ class Demo:
             with self.flock:
                 st = f.start(pose)
                 self.follow[name] = f
+            lv = self.live.get(name)
+            if lv is not None:
+                lv["state"] = None  # the page shows the new guidance from the answer, not the last one's state
             return {"goal": f.name, "route": st["route"], "remaining_m": st["remaining_m"]}
         return None
+
+    def stop_follow(self, name):
+        self.follow.pop(name, None)
+        if name in self.live:
+            self.live[name]["state"] = None
 
     def follow_update(self, name, pose):
         f = self.follow.get(name)
@@ -252,6 +260,10 @@ def make_handler(demo: Demo):
                     return self._send(200, demo.live_post(rec))
                 except Exception as e:
                     return self._send(500, {"error": f"{type(e).__name__}: {e}"})
+            if path == "/api/follow_stop":
+                req = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))) or b"{}")
+                demo.stop_follow(req.get("scene"))
+                return self._send(200, {"ok": True})
             if path == "/api/follow":
                 try:
                     req = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
