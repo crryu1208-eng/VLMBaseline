@@ -115,9 +115,9 @@ class SpatialIndex:
             path.append(u)
         return path[::-1]
 
-    def _pose_place(self):
-        """Graph place closest to the user (only places with edges, so routes exist)."""
-        x, y, _ = self.pose
+    def _pose_place(self, pose=None):
+        """Graph place closest to the user (or to pose; only places with edges, so routes exist)."""
+        x, y, _ = pose if pose is not None else self.pose
         ids = [p for p in self.adj]
         c = np.array([self.place[p].center[:2] for p in ids])
         return ids[int(np.linalg.norm(c - [x, y], axis=1).argmin())]

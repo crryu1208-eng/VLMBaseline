@@ -51,6 +51,8 @@ class Demo:
                 self.agent[name] = Agent(proc, model, self.idx[name])
         self.follow = {}  # scene -> Follower of the last guidance from the user's pose
         self.lock = threading.Lock()  # one GPU, one question at a time
+        self.flock = threading.Lock()  # followers (pose updates must not wait for a question)
+        self.live = {}  # scene -> latest pose from the mapping pipeline (live/bridge.py) and announcements
 
     # ------------------------------------------------------------ map data
     def scene_json(self, name):
@@ -156,9 +158,9 @@ class Demo:
                 f = Follower(self.idx[name], area=r["goal_area"]["area"])
             else:
                 continue
-            with self.lock:
+            with self.flock:
                 st = f.start(pose)
-            self.follow[name] = f
+                self.follow[name] = f
             return {"goal": f.name, "route": st["route"], "remaining_m": st["remaining_m"]}
         return None
 
@@ -166,8 +168,40 @@ class Demo:
         f = self.follow.get(name)
         if f is None:
             return {"error": "길 안내를 먼저 받아야 합니다"}
-        with self.lock:
+        with self.flock:
             return f.update(pose)
+
+    # ------------------------------------------------------------ live pose (mapping pipeline)
+    @staticmethod
+    def _say(lv, texts):
+        for t in texts:
+            lv["seq"] += 1
+            lv["say"].append([lv["seq"], t])
+        del lv["say"][:-50]
+
+    def live_post(self, rec):
+        """A pose from live/bridge.py: keep it; with an active guidance, update it and queue the announcements."""
+        name = rec["scene"]
+        lv = self.live.setdefault(name, {"seq": 0, "say": []})
+        lv.update(t=time.time(), localized=bool(rec.get("localized")), since_loc_s=rec.get("since_loc_s"))
+        if not rec.get("localized") or not rec.get("pose"):
+            return {"ok": True, "follow": None}
+        lv["pose"] = [float(v) for v in rec["pose"]]
+        st = None
+        f = self.follow.get(name)
+        if f is not None and not f.arrived:
+            st = self.follow_update(name, tuple(lv["pose"]))
+            self._say(lv, st.get("say", []))
+            lv["state"] = {k: st.get(k) for k in ("next", "remaining_m", "arrived", "goal", "route")}
+        return {"ok": True, "follow": st}
+
+    def live_get(self, name, after=0):
+        lv = self.live.get(name)
+        if lv is None:
+            return {"live": False}
+        return {"live": True, "age_s": round(time.time() - lv["t"], 1), "localized": lv.get("localized"),
+                "since_loc_s": lv.get("since_loc_s"), "pose": lv.get("pose"), "state": lv.get("state"),
+                "say": [x for x in lv["say"] if x[0] > after], "seq": lv["seq"]}
 
     @staticmethod
     def _tools_only(idx, q):
@@ -200,6 +234,8 @@ def make_handler(demo: Demo):
                 return self._send(200, {"scenes": list(demo.idx), "model": bool(demo.agent)})
             if u.path == "/api/scene" and qs.get("name") in demo.idx:
                 return self._send(200, demo.scene_json(qs["name"]))
+            if u.path == "/api/live" and qs.get("scene") in demo.idx:
+                return self._send(200, demo.live_get(qs["scene"], int(qs.get("after", 0) or 0)))
             if u.path == "/api/view" and qs.get("name") in demo.idx and re.fullmatch(r"O\d+", qs.get("sym", "")):
                 f = demo.aug / qs["name"] / "views" / f"{qs['sym']}.jpg"
                 if f.exists():
@@ -208,6 +244,14 @@ def make_handler(demo: Demo):
 
         def do_POST(self):
             path = urlparse(self.path).path
+            if path == "/api/live":
+                try:
+                    rec = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
+                    if rec.get("scene") not in demo.idx:
+                        return self._send(400, {"error": "scene"})
+                    return self._send(200, demo.live_post(rec))
+                except Exception as e:
+                    return self._send(500, {"error": f"{type(e).__name__}: {e}"})
             if path == "/api/follow":
                 try:
                     req = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))

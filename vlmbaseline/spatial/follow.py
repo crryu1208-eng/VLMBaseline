@@ -79,8 +79,7 @@ class Follower:
     def start(self, pose):
         """Plan from this pose; returns the first update (announces the first leg)."""
         idx = self.idx
-        idx.pose = tuple(pose)
-        src = idx._pose_place()
+        src = idx._pose_place(pose)  # idx.pose is left alone (a question may be answered meanwhile)
         dist, prev = idx._dijkstra(src)
         gp, gxy, self.name, self.sym = self._target(dist)
         if gp not in dist:
@@ -160,8 +159,7 @@ class Follower:
 
     def _walk_left(self, pose):
         """Walking distance from this pose to the goal over the place graph (m)."""
-        self.idx.pose = tuple(pose)
-        p = self.idx._pose_place()
+        p = self.idx._pose_place(pose)
         if p not in self.to_goal:
             return float("inf")
         return float(np.linalg.norm(np.asarray(pose[:2]) - self.idx.place[p].center[:2])) + self.to_goal[p] + self.goal_extra

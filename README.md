@@ -17,6 +17,8 @@ Producing and merging scene graphs stays in hydra-observation-ws.
     vlmbaseline/augment/  VLM descriptions of every object and of floor areas, written into the graph (metadata.vlm)
     vlmbaseline/spatial/  spatial tools (count, nearest, distances, routes, search, turn-by-turn from the user's pose),
                       tool-using QA / guidance agent
+    vlmbaseline/live/     live pose: RTAB-Map localization in a saved map -> export frame -> demo (ROS 2 side: bridge.py)
+    scripts/              saved map, bag replay and live camera runs (inside the hydra-dev ROS 2 container)
     vlmbaseline/demo/     local web page to try the agent (stdlib http.server, one HTML file)
     vlmbaseline/bench/    VLM benchmark (object naming, descriptions, scene QA)
     docs/                 export format, design notes
@@ -46,6 +48,17 @@ your position or '걸어 보기' gives turn-by-turn announcements while walking,
 
     python -m vlmbaseline.demo.server            # http://127.0.0.1:8765 (local only); --no-model for the map only
     # http://127.0.0.1:8765/?scene=lab_03&pose=29.8,-23.0,131&q=여기서 가장 가까운 화분까지 어떻게 가?
+
+Live position (the D435i walking with the user, or a recorded session replayed as if live), in the hydra-dev
+container with the files copied in (`docker cp vlmbaseline/live hydra-dev:/tmp/vlmlive`, and `scripts/*.sh` into it):
+
+    docker exec hydra-dev bash /tmp/vlmlive/build_map.sh <session>/bag /tmp/vlmlive/map_<scene>   # one connected map
+    python -m vlmbaseline.live.align <map_poses.txt> data/<scene> -o outputs/live/<scene>_align.json  # map -> export
+    docker exec -e SERVER=http://127.0.0.1:8765 hydra-dev bash /tmp/vlmlive/localize_bag.sh \
+        <map.db> <other session>/bag <align.json> /tmp/vlmlive/run     # replay a recording as live
+    docker exec -it hydra-dev bash /tmp/vlmlive/live_localize.sh <map.db> <align.json>    # the camera
+    python -m vlmbaseline.live.bench_live <run>/poses.jsonl --scene lab_03 [--gt]
+    # http://127.0.0.1:8765/?scene=lab_03&live=1 : '실시간 위치' follows the camera; guidance announcements arrive there
 
 In code: `Agent(proc, model, SpatialIndex(scene)).ask("여기서 가장 가까운 화분까지 어떻게 가?", pose=(x, y, yaw))`;
 without `pose`, guidance needs a start object named in the question.

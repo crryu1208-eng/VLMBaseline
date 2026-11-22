@@ -79,7 +79,8 @@ details pre { white-space: pre-wrap; font-size: 11.5px; max-height: 320px; overf
     </div>
     <div>
       <div class="row"><b>내 위치</b> <span id="pose" class="muted">정하지 않음 (위치 없이 질문)</span>
-        <button id="clear">지우기</button></div>
+        <button id="clear">지우기</button>
+        <label class="muted"><input type="checkbox" id="live"> 실시간 위치</label> <span id="livestat" class="muted"></span></div>
       <div class="muted">지도를 누른 채 끌면 위치와 바라보는 방향이 정해집니다. 확대·축소: 휠 또는 ＋/－, 이동: 오른쪽 버튼(또는 Shift)으로 끌기, 휴대폰은 ✋ 버튼을 켜고 끌기.</div>
     </div>
     <div class="log" id="log"></div>
@@ -194,7 +195,7 @@ cv.addEventListener("pointerdown", e => {
   drag = e.button === 2 || e.shiftKey || panMode ? {pan: true, u, v, x: view.x, y: view.y} : {pan: false, w: S2W(u, v)};
   if (!drag.pan) { pose = [drag.w[0], drag.w[1], pose ? pose[2] : 0]; showPose(); draw(); }
 });
-cv.addEventListener("pointerup", () => { const moved = drag && !drag.pan; drag = null; if (moved && walking) followStep(); });
+cv.addEventListener("pointerup", () => { const moved = drag && !drag.pan; drag = null; if (moved && walking && !liveTimer) followStep(); });
 cv.addEventListener("pointercancel", () => { drag = null; });
 cv.addEventListener("pointermove", e => {
   const r = cv.getBoundingClientRect(), u = e.clientX - r.left, v = e.clientY - r.top;
@@ -311,6 +312,34 @@ $("play").onclick = () => {
     await followStep();
   }, 500);
 };
+// ---------------------------------------------------------------- live pose from the mapping pipeline (live/bridge.py)
+let liveTimer = null, liveSeq = null;
+async function livePoll() {
+  let d;
+  try { d = await (await fetch(`/api/live?scene=${encodeURIComponent(S.name)}&after=${liveSeq ?? 1e9}`)).json(); }
+  catch (e) { $("livestat").textContent = "서버 연결 안 됨"; return; }
+  if (!d.live) { $("livestat").textContent = "위치 신호 없음"; return; }
+  if (d.age_s > 3) $("livestat").textContent = `신호 끊김 (${Math.round(d.age_s)}초 전)`;
+  else if (!d.localized) $("livestat").textContent = "지도에서 위치 찾는 중…";
+  else $("livestat").textContent = d.since_loc_s > 10 ? `받는 중 (지도 맞춤 ${Math.round(d.since_loc_s)}초 전)` : "받는 중";
+  if (d.localized && d.pose && d.age_s <= 3) { pose = d.pose; showPose(); draw(); }
+  if (liveSeq !== null) for (const [, t] of d.say) { bubble("sys", esc(t)); speak(t); }
+  liveSeq = d.seq;
+  const st = d.state;
+  // guidance started elsewhere (another page, a phone) shows here too
+  if (!walking && st && !st.arrived) { setWalk({goal: st.goal, route: st.route, remaining_m: st.remaining_m}); $("play").disabled = true; draw(); }
+  if (walking && st) {
+    if (st.route) route = st.route;
+    $("walkinfo").textContent = st.arrived ? "도착" : `남은 거리 ${st.remaining_m} m` + (st.next ? ` · ${st.next.in_m} m 뒤 ${st.next.turn}` : "");
+  }
+}
+function setLive(on) {
+  if (liveTimer) clearInterval(liveTimer);
+  liveTimer = null; liveSeq = null; $("livestat").textContent = "";
+  $("play").disabled = on;  // the walk comes from the camera, not from the page
+  if (on) { stopPlay(); livePoll(); liveTimer = setInterval(livePoll, 500); }
+}
+$("live").onchange = e => setLive(e.target.checked);
 $("ask").onclick = ask;
 $("q").addEventListener("keydown", e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); ask(); } });
 $("log").addEventListener("click", e => {
@@ -325,12 +354,14 @@ addEventListener("resize", fit);
   const d = await (await fetch("/api/scenes")).json();
   for (const n of d.scenes) { const o = document.createElement("option"); o.value = o.textContent = n; $("scene").appendChild(o); }
   if (!d.model) $("status").textContent = "모델 없이 실행 중";
-  // ?scene=lab_03&pose=x,y,heading_deg&q=question opens that case (and asks it); &walk=1 then walks the route
+  // ?scene=lab_03&pose=x,y,heading_deg&q=question opens that case (and asks it); &walk=1 then walks the route;
+  // &live=1 takes the pose from the mapping pipeline
   const P = new URLSearchParams(location.search), sc = P.get("scene");
   if (sc && d.scenes.includes(sc)) $("scene").value = sc;
   await loadScene($("scene").value);
   const pp = (P.get("pose") || "").split(",").map(Number);
   if (pp.length === 3 && pp.every(isFinite)) { pose = [pp[0], pp[1], pp[2] * Math.PI / 180]; showPose(); draw(); }
+  if (P.get("live")) { $("live").checked = true; setLive(true); }
   if (P.get("q")) { $("q").value = P.get("q"); await ask(); if (P.get("walk") && walking) $("play").click(); }
 })();
 </script>
