@@ -25,7 +25,16 @@ if [ -e "$OUT" ]; then echo "$OUT already exists"; exit 1; fi
 mkdir -p "$OUT"
 cp "$DB" "$OUT/map.db"
 PIDS=()
-cleanup() { for p in "${PIDS[@]}"; do kill -INT "$p" 2>/dev/null || true; done; wait 2>/dev/null; rm -f "$OUT/map.db"; }
+# each job is its own process group (set -m): signal the group, so `ros2 run` children stop too; SIGTERM after 10 s
+cleanup() {
+  for p in "${PIDS[@]}"; do kill -INT -- "-$p" 2>/dev/null || true; done
+  for i in $(seq 1 10); do
+    alive=0; for p in "${PIDS[@]}"; do kill -0 -- "-$p" 2>/dev/null && alive=1; done
+    [ $alive = 0 ] && break; sleep 1
+  done
+  for p in "${PIDS[@]}"; do kill -TERM -- "-$p" 2>/dev/null || true; done
+  rm -f "$OUT/map.db"
+}
 trap cleanup EXIT
 
 ros2 launch realsense2_camera rs_launch.py \
