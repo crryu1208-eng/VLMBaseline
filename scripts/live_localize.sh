@@ -7,7 +7,8 @@
 # Then open http://127.0.0.1:8765/?scene=<scene>&live=1, ask '여기서 ... 어떻게 가?' and walk. Enter (or Ctrl-C) stops.
 # Check first that no recording session is running (one camera, one user).
 # Env: FPS (default 15), RES (default 848x480: odometry and localization do not need 720p), SERVER
-# (default http://127.0.0.1:8765), SCENE.
+# (default http://127.0.0.1:8765), SCENE, BAG=1 also records the camera, odometry and localization topics to
+# <out dir>/bag (~40 MB/s) so the walk can be replayed later with localize_bag.sh, MAX_MIN (default 15) stops by itself.
 set -eo pipefail
 set -m
 DB="${1:?usage: live_localize.sh <map.db> <align.json> [out dir]}"; ALIGN="${2:?}"
@@ -70,5 +71,28 @@ PIDS+=($!)
 python3 "$HERE/bridge.py" --align "$ALIGN" ${SCENE:+--scene $SCENE} --server "$SERVER" --log "$OUT/poses.jsonl" \
   < /dev/null > "$OUT/bridge.log" 2>&1 &
 PIDS+=($!)
-echo "live localization running ($OUT); open $SERVER/?scene=${SCENE:-<scene>}&live=1 . Enter stops."
-read -r _ || true
+if [ "${BAG:-0}" = 1 ]; then
+  ros2 bag record -s sqlite3 -o "$OUT/bag" $CAM/color/image_raw $CAM/color/camera_info \
+    $CAM/aligned_depth_to_color/image_raw $CAM/aligned_depth_to_color/camera_info $CAM/imu \
+    /rtabmap/odom /rtabmap/info /rtabmap/localization_pose /tf /tf_static \
+    < /dev/null > "$OUT/bag_record.log" 2>&1 &
+  PIDS+=($!)
+fi
+MAX_MIN="${MAX_MIN:-15}"
+echo "live localization running ($OUT); open $SERVER/?scene=${SCENE:-<scene>}&live=1"
+echo "Enter stops (or after $MAX_MIN min)."
+T0=$(date +%s)
+status() {  # one line every 5 s: how many updates had a pose in the saved map
+  local n=0 k=0
+  [ -f "$OUT/poses.jsonl" ] && n=$(wc -l < "$OUT/poses.jsonl") && k=$(grep -c '"localized": true' "$OUT/poses.jsonl" || true)
+  local last=$(tail -1 "$OUT/poses.jsonl" 2>/dev/null | grep -o '"localized": [a-z]*' | cut -d' ' -f2)
+  printf '\r%4ds  updates %d, in the map %d, now %s   ' $(( $(date +%s) - T0 )) "$n" "$k" "${last:-waiting}"
+}
+while ! read -r -t 5 _; do
+  status
+  [ $(( $(date +%s) - T0 )) -ge $(( MAX_MIN * 60 )) ] && { echo; echo "time limit"; break; }
+  # stdin closed (non-interactive run): keep going until the time limit
+  [ -t 0 ] || [ -p /dev/stdin ] || sleep 5
+done
+echo
+status; echo
