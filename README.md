@@ -49,10 +49,14 @@ your position or '걸어 보기' gives turn-by-turn announcements while walking,
     python -m vlmbaseline.demo.server            # http://127.0.0.1:8765 (local only); --no-model for the map only
     # http://127.0.0.1:8765/?scene=lab_03&pose=29.8,-23.0,131&q=여기서 가장 가까운 화분까지 어떻게 가?
 
+The voice is made by the server without network (`pip install -e .[tts]`: Supertonic, code MIT, weights OpenRAIL-M,
+ONNX on the CPU, ~1.5 s per new sentence, repeated sentences cached; the ~390 MB model is downloaded once into
+~/.cache/supertonic3). Without it, or with `--no-tts`, the page uses the browser's voice.
+
 Live position (the D435i walking with the user, or a recorded session replayed as if live), in the hydra-dev
 container with the files copied in (`docker cp vlmbaseline/live hydra-dev:/tmp/vlmlive`, and `scripts/*.sh` into it):
 
-    docker exec hydra-dev bash /tmp/vlmlive/build_map.sh <session>/bag /tmp/vlmlive/map_<scene>   # one connected map
+    docker exec hydra-dev bash /tmp/vlmlive/build_map.sh /tmp/vlmlive/map_<scene> <session>/bag...  # saved map
     python -m vlmbaseline.live.align <map_poses.txt> data/<scene> -o outputs/live/<scene>_align.json  # map -> export
     docker exec -e SERVER=http://127.0.0.1:8765 hydra-dev bash /tmp/vlmlive/localize_bag.sh \
         <map.db> <other session>/bag <align.json> /tmp/vlmlive/run     # replay a recording as live

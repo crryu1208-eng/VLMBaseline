@@ -28,8 +28,12 @@ HERE = Path(__file__).parent
 
 
 class Demo:
-    def __init__(self, scenes, model_id, aug, use_model=True):
+    def __init__(self, scenes, model_id, aug, use_model=True, use_tts=True):
         self.aug = Path(aug)
+        self.speaker = None
+        if use_tts:
+            from vlmbaseline.demo.tts import Speaker
+            self.speaker = Speaker()  # loads in the background
         self.idx, self.agent = {}, {}
         enc = None
         try:
@@ -239,7 +243,13 @@ def make_handler(demo: Demo):
             if u.path == "/":
                 return self._send(200, (HERE / "index.html").read_bytes(), "text/html; charset=utf-8")
             if u.path == "/api/scenes":
-                return self._send(200, {"scenes": list(demo.idx), "model": bool(demo.agent)})
+                return self._send(200, {"scenes": list(demo.idx), "model": bool(demo.agent),
+                                        "tts": bool(demo.speaker and demo.speaker.ready)})
+            if u.path == "/api/tts":  # the guidance sentence as speech (wav), made on this computer
+                w = demo.speaker.wav(qs.get("text", "")) if demo.speaker else None
+                if w is None:
+                    return self._send(503, {"error": "speech not loaded"})
+                return self._send(200, w, "audio/wav")
             if u.path == "/api/scene" and qs.get("name") in demo.idx:
                 return self._send(200, demo.scene_json(qs["name"]))
             if u.path == "/api/live" and qs.get("scene") in demo.idx:
@@ -306,8 +316,9 @@ def main():
     ap.add_argument("--aug", default="outputs/augmented")
     ap.add_argument("--scenes", nargs="+", default=["library_merged", "lab_03"])
     ap.add_argument("--port", type=int, default=8765)
+    ap.add_argument("--no-tts", action="store_true", help="no speech on the server (the page uses the browser's voice)")
     a = ap.parse_args()
-    demo = Demo(a.scenes, a.model, a.aug, use_model=not a.no_model)
+    demo = Demo(a.scenes, a.model, a.aug, use_model=not a.no_model, use_tts=not a.no_tts)
     srv = ThreadingHTTPServer(("127.0.0.1", a.port), make_handler(demo))
     print(f"http://127.0.0.1:{a.port}", flush=True)
     srv.serve_forever()

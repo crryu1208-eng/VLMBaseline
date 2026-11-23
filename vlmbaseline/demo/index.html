@@ -280,9 +280,31 @@ function setWalk(f) {
   $("walk").classList.toggle("on", !!walking);
   if (walking) { if (walking.route) route = walking.route; $("walkinfo").textContent = `${walking.goal}까지 ${walking.remaining_m} m`; }
 }
+// speech: the server makes it (/api/tts, works without network); the browser's voice when the server has none.
+// Sentences play in order; the wav is requested as soon as the sentence comes, so the next one is ready in time.
+const sayQ = []; let saying = false;
 function speak(t) {
-  if (!$("voice").checked || !("speechSynthesis" in window)) return;
-  const u = new SpeechSynthesisUtterance(t.replace(/\(O\d+\)/g, "")); u.lang = "ko-KR"; speechSynthesis.speak(u);
+  if (!$("voice").checked) return;
+  t = t.replace(/\s*\(O\d+\)/g, "");
+  if (sayQ.length >= 3) sayQ.shift();  // walking on: an old instruction is no use any more
+  sayQ.push({t, wav: fetch("/api/tts?text=" + encodeURIComponent(t)).then(r => r.ok ? r.blob() : null).catch(() => null)});
+  if (!saying) sayNext();
+}
+async function sayNext() {
+  const it = sayQ.shift();
+  if (!it) { saying = false; return; }
+  saying = true;
+  let done = false; const next = () => { if (!done) { done = true; sayNext(); } };
+  const b = await it.wav;
+  if (b) {
+    const a = new Audio(URL.createObjectURL(b));
+    a.onended = a.onerror = () => { URL.revokeObjectURL(a.src); next(); };
+    a.play().catch(() => browserSay(it.t, next));
+  } else browserSay(it.t, next);
+}
+function browserSay(t, done) {
+  if (!("speechSynthesis" in window)) return done();
+  const u = new SpeechSynthesisUtterance(t); u.lang = "ko-KR"; u.onend = u.onerror = done; speechSynthesis.speak(u);
 }
 async function followStep() {
   if (!walking || !pose) return null;
