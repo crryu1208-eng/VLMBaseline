@@ -9,6 +9,7 @@
 # Env: FPS (default 15), RES (default 848x480: odometry and localization do not need 720p), SERVER
 # (default http://127.0.0.1:8765), SCENE, BAG=1 also records the camera, odometry and localization topics to
 # <out dir>/bag (~40 MB/s) so the walk can be replayed later with localize_bag.sh, MAX_MIN (default 15) stops by itself.
+# NO_GATE=1 takes every localization at once (no jump check, live/posecore.py); raw.jsonl keeps the bridge inputs.
 set -eo pipefail
 set -m
 DB="${1:?usage: live_localize.sh <map.db> <align.json> [out dir]}"; ALIGN="${2:?}"
@@ -69,6 +70,7 @@ PIDS+=($!)
   < /dev/null > "$OUT/rtabmap.log" 2>&1 &
 PIDS+=($!)
 python3 "$HERE/bridge.py" --align "$ALIGN" ${SCENE:+--scene $SCENE} --server "$SERVER" --log "$OUT/poses.jsonl" \
+  --raw "$OUT/raw.jsonl" ${NO_GATE:+--no-gate} \
   < /dev/null > "$OUT/bridge.log" 2>&1 &
 PIDS+=($!)
 if [ "${BAG:-0}" = 1 ]; then

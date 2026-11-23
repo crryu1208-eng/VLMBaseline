@@ -24,6 +24,7 @@ fi
 echo "demo server: http://127.0.0.1:8765/?scene=$SCENE&live=1"
 docker exec hydra-dev mkdir -p /tmp/vlmlive
 docker cp vlmbaseline/live/bridge.py hydra-dev:/tmp/vlmlive/
+docker cp vlmbaseline/live/posecore.py hydra-dev:/tmp/vlmlive/
 docker cp scripts/live_localize.sh hydra-dev:/tmp/vlmlive/
 docker cp "$DB" hydra-dev:/tmp/vlmlive/$SCENE.db
 docker cp "$ALIGN" hydra-dev:/tmp/vlmlive/${SCENE}_align.json

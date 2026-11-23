@@ -62,7 +62,11 @@ container with the files copied in (`docker cp vlmbaseline/live hydra-dev:/tmp/v
         <map.db> <other session>/bag <align.json> /tmp/vlmlive/run     # replay a recording as live
     docker exec -it hydra-dev bash /tmp/vlmlive/live_localize.sh <map.db> <align.json>    # the camera
     python -m vlmbaseline.live.bench_live <run>/poses.jsonl --scene lab_03 [--gt]
+    python -m vlmbaseline.live.replay_raw <run>/raw.jsonl --align <align.json> -o p.jsonl [--jump-m 2]  # other settings
     # http://127.0.0.1:8765/?scene=lab_03&live=1 : '실시간 위치' follows the camera; guidance announcements arrive there
+
+A localization far from where odometry carries the user (a look-alike aisle) is not taken at once: the position is
+marked uncertain ('위치 확인 중') and the guidance waits (vlmbaseline/live/posecore.py).
 
 In code: `Agent(proc, model, SpatialIndex(scene)).ask("여기서 가장 가까운 화분까지 어떻게 가?", pose=(x, y, yaw))`;
 without `pose`, guidance needs a start object named in the question.

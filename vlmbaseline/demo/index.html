@@ -345,6 +345,7 @@ async function livePoll() {
   if (!d.live) { $("livestat").textContent = "위치 신호 없음"; return; }
   if (d.age_s > 3) $("livestat").textContent = `신호 끊김 (${Math.round(d.age_s)}초 전)`;
   else if (!d.localized) $("livestat").textContent = "지도에서 위치 찾는 중…";
+  else if (d.uncertain) $("livestat").textContent = "위치 확인 중 (안내 잠시 멈춤)";
   else $("livestat").textContent = d.since_loc_s > 10 ? `받는 중 (지도 맞춤 ${Math.round(d.since_loc_s)}초 전)` : "받는 중";
   if (d.localized && d.pose && d.age_s <= 3) { pose = d.pose; showPose(); draw(); }
   if (liveSeq !== null) for (const [, t] of d.say) { bubble("sys", esc(t)); speak(t); }

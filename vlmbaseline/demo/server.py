@@ -195,12 +195,20 @@ class Demo:
         """A pose from live/bridge.py: keep it; with an active guidance, update it and queue the announcements."""
         name = rec["scene"]
         lv = self.live.setdefault(name, {"seq": 0, "say": []})
-        lv.update(t=time.time(), localized=bool(rec.get("localized")), since_loc_s=rec.get("since_loc_s"))
+        unc = bool(rec.get("uncertain"))
+        lv.update(t=time.time(), localized=bool(rec.get("localized")), since_loc_s=rec.get("since_loc_s"), uncertain=unc)
         if not rec.get("localized") or not rec.get("pose"):
             return {"ok": True, "follow": None}
         lv["pose"] = [float(v) for v in rec["pose"]]
         st = None
         f = self.follow.get(name)
+        if f is not None and not f.arrived and unc:
+            # the pose may be wrong (live/posecore.py): no turn, reroute or arrival from it; say so once
+            if not lv.get("held"):
+                lv["held"] = True
+                self._say(lv, ["위치를 다시 확인하고 있습니다. 천천히 걸어 주세요."])
+            return {"ok": True, "follow": None, "held": True}
+        lv["held"] = False
         if f is not None and not f.arrived:
             st = self.follow_update(name, tuple(lv["pose"]))
             self._say(lv, st.get("say", []))
@@ -212,6 +220,7 @@ class Demo:
         if lv is None:
             return {"live": False}
         return {"live": True, "age_s": round(time.time() - lv["t"], 1), "localized": lv.get("localized"),
+                "uncertain": lv.get("uncertain", False),
                 "since_loc_s": lv.get("since_loc_s"), "pose": lv.get("pose"), "state": lv.get("state"),
                 "say": [x for x in lv["say"] if x[0] > after], "seq": lv["seq"]}
 

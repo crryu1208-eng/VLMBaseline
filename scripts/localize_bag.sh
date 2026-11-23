@@ -5,7 +5,8 @@
 #   docker cp vlmbaseline/live hydra-dev:/tmp/vlmlive && docker cp scripts/localize_bag.sh hydra-dev:/tmp/vlmlive/
 #   docker exec hydra-dev bash /tmp/vlmlive/localize_bag.sh <saved map rtabmap.db> <session bag dir> <align.json> <out dir> [rate]
 # The map database is copied first (localization mode does not add nodes, but rtabmap still writes to it).
-# Env: SERVER=http://127.0.0.1:8765 posts to the demo; SCENE overrides the scene name in align.json.
+# Env: SERVER=http://127.0.0.1:8765 posts to the demo; SCENE overrides the scene name in align.json. NO_GATE=1
+# takes every localization at once (no jump check, see live/posecore.py); raw.jsonl keeps the inputs.
 # A live camera runs the same nodes with realsense + rtabmap_odom instead of the bag (scripts/live_localize.sh).
 set -eo pipefail
 DB="${1:?usage: localize_bag.sh <rtabmap.db> <bag dir> <align.json> <out dir> [rate]}"
@@ -50,7 +51,7 @@ for i in $(seq 1 120); do
   sleep 1
 done
 python3 "$HERE/bridge.py" --align "$ALIGN" ${SCENE:+--scene $SCENE} ${SERVER:+--server $SERVER} \
-  --log "$OUT/poses.jsonl" --ros-args -p use_sim_time:=true < /dev/null > "$OUT/bridge.log" 2>&1 &
+  --log "$OUT/poses.jsonl" --raw "$OUT/raw.jsonl" ${NO_GATE:+--no-gate} --ros-args -p use_sim_time:=true < /dev/null > "$OUT/bridge.log" 2>&1 &
 PIDS+=($!)
 sleep 3
 echo "localizing $BAG in $DB at rate $RATE"

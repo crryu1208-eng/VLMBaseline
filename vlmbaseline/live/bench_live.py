@@ -8,8 +8,10 @@ error        --gt (the replayed session is the one the export was built from): d
              export's keyframe pose at the same stamp
 on_map       distance from the pose to the nearest walkable place (a pose off the floor plan is wrong)
 jumps        consecutive updates more than 1 m apart (a person walks ~0.7 m in 0.5 s)
+uncertain    share of the updates marked uncertain (live/posecore.py: a localization far from odometry not taken yet);
+             with --gt, the error when marked and when not
 follow       guidance on the live stream as bench_follow does on keyframes: a stretch of 8-35 m, the goal an object
-             within 1.5 m of its end; arrived / false reroutes
+             within 1.5 m of its end; arrived / false reroutes; as the demo server, no update from an uncertain pose
 """
 from __future__ import annotations
 
@@ -59,25 +61,30 @@ def main():
                                      round(float(on.max()), 2)]
     step = np.linalg.norm(np.diff(P[:, :2], axis=0), axis=1)
     out["jumps_over_1m"] = int((step > 1.0).sum())
+    U = np.array([bool(r.get("uncertain")) for r in loc])
+    out["uncertain"] = f"{int(U.sum())}/{len(U)}"
     if a.gt:
         kt = np.array([k.timestamp_ns for k in s.keyframes]) if hasattr(s.keyframes[0], "timestamp_ns") else None
         if kt is None:
             K = [json.loads(l) for l in open(Path("data") / a.scene / "keyframes" / "keyframes.jsonl")]
             kt = np.array([k["timestamp_ns"] for k in K])
         G = [nav.pose_from_T(k.world_T_sensor) for k in s.keyframes]
-        e, h = [], []
-        for r, p in zip(loc, P):
+        e, h, eu = [], [], []
+        for r, p, u in zip(loc, P, U):
             i = int(np.argmin(abs(kt - r["stamp_ns"])))
             if abs(kt[i] - r["stamp_ns"]) > 0.1e9:
                 continue
             e.append(float(np.hypot(p[0] - G[i][0], p[1] - G[i][1])))
             h.append(abs((math.degrees(p[2] - G[i][2]) + 180) % 360 - 180))
-        e, h = np.array(e), np.array(h)
+            eu.append(u)
+        e, h, eu = np.array(e), np.array(h), np.array(eu, bool)
         out["gt_pairs"] = len(e)
         out["error_m_median_90_max"] = [round(float(np.median(e)), 2), round(float(np.percentile(e, 90)), 2),
                                         round(float(e.max()), 2)]
         out["heading_deg_median_90"] = [round(float(np.median(h)), 1), round(float(np.percentile(h, 90)), 1)]
         out["error_under_1m"] = f"{int((e < 1).sum())}/{len(e)}"
+        out["error_over_2m_certain_uncertain"] = [int((e[~eu] > 2).sum()), int((e[eu] > 2).sum())]
+        out["error_m_90_certain"] = round(float(np.percentile(e[~eu], 90)), 2) if (~eu).any() else None
     # guidance on the live stream
     rng = random.Random(a.seed)
     cum = np.concatenate([[0.0], np.cumsum(step)])
@@ -101,7 +108,7 @@ def main():
             continue
         if not (cum[j] - cum[i] <= 1.3 * f.total + 2.0 and f.total > 4.0):
             continue
-        stream = [tuple(P[k]) for k in range(i + 1, j + 1)]
+        stream = [tuple(P[k]) for k in range(i + 1, j + 1) if not U[k]]
         last, v = P[j, :2], goal.center[:2] - P[j, :2]
         n = int(np.linalg.norm(v) / 0.25)
         stream += [(*(last + v * (t + 1) / max(n, 1)), math.atan2(v[1], v[0])) for t in range(n)]
