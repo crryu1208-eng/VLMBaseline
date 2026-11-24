@@ -14,8 +14,14 @@ back (the same place in confirm matches) after odometry alone walked trust_m sin
 (odometry drifts, so a real correction comes back like that), or at once when odometry was lost. A match that
 agrees with odometry again ends the uncertainty.
 Settings from 9 library replays in maps of other recordings (docs/bench_2026-11-19.md): jump_m 2.0-2.5 the same,
-3.0 lets wrong aisles through; trust_m under 25 takes them too. Odometry alone for long is not marked: its error
-stayed under 1.4 m there (since_loc_m says how far it carried the pose).
+3.0 lets wrong aisles through; trust_m under 25 takes them too.
+
+Lost odometry: when odometry was lost since the last accepted match (it restarts from a guess), the pose is marked
+uncertain too (why "lost") until the map matches again. On the first real walk (2026-11-24, lab_03) no frame matched
+for 2 min in a part the map saw only facing the other way, odometry was lost three times there, and the pose was 7 m
+off (drawn outside the corridor) when the map matched again, with nothing said. Odometry alone without a loss is not
+marked by default: in the 9 library replays its error stayed under 1.35 m even 30 m after the last match, and
+marking it from 10 m on would hold the guidance 30% of the time (stale_m sets a distance anyway, why "far").
 """
 from __future__ import annotations
 
@@ -28,12 +34,13 @@ NEAR_M = 4.0  # the correction comes from a map node this close to the pose
 
 
 class PoseCore:
-    def __init__(self, align, gate=True, jump_m=2.0, confirm=3, trust_m=25.0):
+    def __init__(self, align, gate=True, jump_m=2.0, confirm=3, trust_m=25.0, stale_m=None):
         self.B_S = np.array(align["body_T_sensor"])
         self.ids = np.array([n["id"] for n in align["nodes"]])
         self.pos = np.array([n["pos"] for n in align["nodes"]])
         self.corr = np.array([n["corr"] for n in align["nodes"]])
         self.gate, self.jump_m, self.confirm, self.trust_m = gate, jump_m, confirm, trust_m
+        self.stale_m = stale_m  # None: never
         self.odom_t, self.odom_T, self.odom_s = [], [], []  # recent odometry by stamp, path length
         self.walked = 0.0
         self.map_T_odom, self.loc_ns, self.node = None, None, None
@@ -129,9 +136,11 @@ class PoseCore:
         f = S[:3, 2]
         since_m = self.walked - self.acc_s
         conflict = len(self.cand)
+        why = "jump" if conflict else "lost" if self.lost else \
+            "far" if self.stale_m is not None and since_m > self.stale_m else None
         rec.update(pose=[round(float(S[0, 3]), 3), round(float(S[1, 3]), 3), round(math.atan2(f[1], f[0]), 4)],
                    since_loc_s=round((t - self.loc_ns) / 1e9, 2), since_loc_m=round(since_m, 2),
-                   conflict=conflict, uncertain=bool(conflict),
+                   conflict=conflict, uncertain=why is not None, why=why,
                    node=int(self.ids[k]), matched=self.node, map_T=[round(float(v), 4) for v in M[:3].ravel()])
         return rec
 

@@ -47,9 +47,11 @@ def main():
     ap.add_argument("--jump-m", type=float, default=2.0)
     ap.add_argument("--confirm", type=int, default=3)
     ap.add_argument("--trust-m", type=float, default=25.0)
+    ap.add_argument("--stale-m", type=float, default=0.0, help="odometry alone this far: uncertain (0: never)")
     a = ap.parse_args()
     recs = replay(a.raw, json.load(open(a.align)), a.scene, gate=not a.no_gate, jump_m=a.jump_m,
-                  confirm=a.confirm, trust_m=a.trust_m)
+                  confirm=a.confirm, trust_m=a.trust_m,
+                  stale_m=a.stale_m or None)
     with open(a.out, "w") as f:
         for r in recs:
             f.write(json.dumps(r) + "\n")

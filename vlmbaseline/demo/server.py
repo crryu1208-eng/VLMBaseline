@@ -25,15 +25,24 @@ from vlmbaseline.spatial.follow import Follower
 from vlmbaseline.spatial.tools import SpatialIndex
 
 HERE = Path(__file__).parent
+STT_HINT = False  # docs/bench_2026-11-19.md, voice input
 
+
+# said once when the guidance holds because the pose may be wrong (live/posecore.py, by the reason)
+HOLD_SAY = {"jump": "위치를 다시 확인하고 있습니다. 천천히 걸어 주세요.",
+            "lost": "위치가 정확하지 않을 수 있습니다. 지도와 다시 맞출 때까지 안내를 멈춥니다. 주변을 천천히 둘러봐 주세요.",
+            "far": "위치가 정확하지 않을 수 있습니다. 지도와 다시 맞출 때까지 안내를 멈춥니다."}
 
 class Demo:
-    def __init__(self, scenes, model_id, aug, use_model=True, use_tts=True):
+    def __init__(self, scenes, model_id, aug, use_model=True, use_tts=True, use_stt=True):
         self.aug = Path(aug)
-        self.speaker = None
+        self.speaker = self.listener = None
         if use_tts:
             from vlmbaseline.demo.tts import Speaker
             self.speaker = Speaker()  # loads in the background
+        if use_stt:
+            from vlmbaseline.demo.stt import Listener
+            self.listener = Listener()  # loads in the background
         self.idx, self.agent = {}, {}
         enc = None
         try:
@@ -53,6 +62,10 @@ class Demo:
             if model is not None:
                 from vlmbaseline.spatial.agent import Agent
                 self.agent[name] = Agent(proc, model, self.idx[name])
+        self.stt_hint = {}  # scene -> area and object names given to Whisper (stt.scene_hint), when STT_HINT
+        if self.listener is not None and STT_HINT:
+            from vlmbaseline.demo.stt import scene_hint
+            self.stt_hint = {n: scene_hint(i) for n, i in self.idx.items()}
         self.follow = {}  # scene -> Follower of the last guidance from the user's pose
         self.lock = threading.Lock()  # one GPU, one question at a time
         self.flock = threading.Lock()  # followers (pose updates must not wait for a question)
@@ -196,7 +209,8 @@ class Demo:
         name = rec["scene"]
         lv = self.live.setdefault(name, {"seq": 0, "say": []})
         unc = bool(rec.get("uncertain"))
-        lv.update(t=time.time(), localized=bool(rec.get("localized")), since_loc_s=rec.get("since_loc_s"), uncertain=unc)
+        lv.update(t=time.time(), localized=bool(rec.get("localized")), since_loc_s=rec.get("since_loc_s"), uncertain=unc,
+                  why=rec.get("why"))
         if not rec.get("localized") or not rec.get("pose"):
             return {"ok": True, "follow": None}
         lv["pose"] = [float(v) for v in rec["pose"]]
@@ -206,8 +220,10 @@ class Demo:
             # the pose may be wrong (live/posecore.py): no turn, reroute or arrival from it; say so once
             if not lv.get("held"):
                 lv["held"] = True
-                self._say(lv, ["위치를 다시 확인하고 있습니다. 천천히 걸어 주세요."])
+                self._say(lv, [HOLD_SAY.get(rec.get("why"), HOLD_SAY["jump"])])
             return {"ok": True, "follow": None, "held": True}
+        if lv.get("held") and f is not None and not f.arrived:
+            self._say(lv, ["위치를 다시 맞췄습니다. 안내를 이어 갑니다."])
         lv["held"] = False
         if f is not None and not f.arrived:
             st = self.follow_update(name, tuple(lv["pose"]))
@@ -220,7 +236,7 @@ class Demo:
         if lv is None:
             return {"live": False}
         return {"live": True, "age_s": round(time.time() - lv["t"], 1), "localized": lv.get("localized"),
-                "uncertain": lv.get("uncertain", False),
+                "uncertain": lv.get("uncertain", False), "why": lv.get("why"),
                 "since_loc_s": lv.get("since_loc_s"), "pose": lv.get("pose"), "state": lv.get("state"),
                 "say": [x for x in lv["say"] if x[0] > after], "seq": lv["seq"]}
 
@@ -253,7 +269,8 @@ def make_handler(demo: Demo):
                 return self._send(200, (HERE / "index.html").read_bytes(), "text/html; charset=utf-8")
             if u.path == "/api/scenes":
                 return self._send(200, {"scenes": list(demo.idx), "model": bool(demo.agent),
-                                        "tts": bool(demo.speaker and demo.speaker.ready)})
+                                        "tts": bool(demo.speaker and demo.speaker.ready),
+                                        "stt": bool(demo.listener and demo.listener.ready)})
             if u.path == "/api/tts":  # the guidance sentence as speech (wav), made on this computer
                 w = demo.speaker.wav(qs.get("text", "")) if demo.speaker else None
                 if w is None:
@@ -279,6 +296,18 @@ def make_handler(demo: Demo):
                     return self._send(200, demo.live_post(rec))
                 except Exception as e:
                     return self._send(500, {"error": f"{type(e).__name__}: {e}"})
+            if path == "/api/stt":  # a spoken question (wav) -> text, recognized on this computer
+                n = int(self.headers.get("Content-Length", 0))
+                if not demo.listener or n > 5_000_000:
+                    return self._send(503 if not demo.listener else 413, {"error": "voice input"})
+                sc = parse_qs(urlparse(self.path).query).get("scene", [None])[0]
+                try:
+                    t = demo.listener.text(self.rfile.read(n), demo.stt_hint.get(sc))
+                except Exception as e:
+                    return self._send(500, {"error": f"{type(e).__name__}: {e}"})
+                if t is None:
+                    return self._send(503, {"error": "voice input not loaded"})
+                return self._send(200, {"text": t})
             if path == "/api/follow_stop":
                 req = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))) or b"{}")
                 demo.stop_follow(req.get("scene"))
@@ -326,8 +355,9 @@ def main():
     ap.add_argument("--scenes", nargs="+", default=["library_merged", "lab_03"])
     ap.add_argument("--port", type=int, default=8765)
     ap.add_argument("--no-tts", action="store_true", help="no speech on the server (the page uses the browser's voice)")
+    ap.add_argument("--no-stt", action="store_true", help="no voice input (Whisper on the GPU, ~1.8 GB)")
     a = ap.parse_args()
-    demo = Demo(a.scenes, a.model, a.aug, use_model=not a.no_model, use_tts=not a.no_tts)
+    demo = Demo(a.scenes, a.model, a.aug, use_model=not a.no_model, use_tts=not a.no_tts, use_stt=not a.no_stt)
     srv = ThreadingHTTPServer(("127.0.0.1", a.port), make_handler(demo))
     print(f"http://127.0.0.1:{a.port}", flush=True)
     srv.serve_forever()

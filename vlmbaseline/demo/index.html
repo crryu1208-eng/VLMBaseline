@@ -91,7 +91,7 @@ details pre { white-space: pre-wrap; font-size: 11.5px; max-height: 320px; overf
       <div class="muted">지도에서 내 위치를 옮기면 그 위치에 맞춰 안내합니다.</div>
     </div>
     <textarea id="q" placeholder="예: 여기서 가장 가까운 화분까지 어떻게 가? (이어서 '거기까지 어떻게 가?'처럼 물어도 됩니다)"></textarea>
-    <div class="row"><button class="primary" id="ask">질문하기</button><button id="newchat">새 대화</button>
+    <div class="row"><button class="primary" id="ask">질문하기</button><button id="mic" title="말로 묻기: 누르고 말한 뒤 잠시 멈추면 질문합니다">말하기</button><button id="newchat">새 대화</button>
       <span class="muted" id="time"></span></div>
     <div class="ex" id="examples"></div>
     <details><summary>도구 호출과 계산 결과</summary><pre id="trace"></pre></details>
@@ -171,9 +171,11 @@ function draw() {
   }
   if (pose) {
     const [u, v] = W2S(pose[0], pose[1]), a = pose[2];
+    ctx.globalAlpha = poseUnsure ? 0.35 : 1;  // live pose that may be wrong: drawn faint
     ctx.fillStyle = css("--me"); ctx.beginPath(); ctx.arc(u, v, 7, 0, 7); ctx.fill();
     ctx.strokeStyle = css("--me"); ctx.lineWidth = 3; ctx.beginPath(); ctx.moveTo(u, v);
     ctx.lineTo(u + 26 * Math.cos(a), v - 26 * Math.sin(a)); ctx.stroke();
+    ctx.globalAlpha = 1;
   }
 }
 
@@ -337,15 +339,34 @@ $("play").onclick = () => {
   }, 500);
 };
 // ---------------------------------------------------------------- live pose from the mapping pipeline (live/bridge.py)
-let liveTimer = null, liveSeq = null;
+let liveTimer = null, liveSeq = null, poseUnsure = false;
+// said aloud when the position is missing for LIVE_SAY_S (once per time), and when it is back
+const LIVE_SAY_S = 3, LIVE_SAY = {search: "지도에서 위치를 찾고 있습니다. 주변을 천천히 둘러봐 주세요.",
+                                  lost: "위치 신호가 끊겼습니다. 잠시 멈춰 주세요.", back: "위치를 찾았습니다.",
+                                  unsure: "위치가 정확하지 않을 수 있습니다. 주변을 천천히 둘러봐 주세요."};
+let liveBad = null;  // {kind, since, said}
+function liveState(kind) {  // kind: "ok" or a missing / doubtful position ("search" / "lost" / "unsure")
+  const now = Date.now() / 1000;
+  if (kind === "ok") {
+    if (liveBad && liveBad.said) { bubble("sys", LIVE_SAY.back); speak(LIVE_SAY.back); }
+    liveBad = null; return;
+  }
+  if (!liveBad || liveBad.kind !== kind) liveBad = {kind, since: now, said: liveBad ? liveBad.said : false, saidKind: liveBad && liveBad.saidKind};
+  if (now - liveBad.since >= LIVE_SAY_S && liveBad.saidKind !== kind) {
+    liveBad.said = true; liveBad.saidKind = kind; bubble("sys", LIVE_SAY[kind]); speak(LIVE_SAY[kind]);
+  }
+}
 async function livePoll() {
   let d;
   try { d = await (await fetch(`/api/live?scene=${encodeURIComponent(S.name)}&after=${liveSeq ?? 1e9}`)).json(); }
-  catch (e) { $("livestat").textContent = "서버 연결 안 됨"; return; }
-  if (!d.live) { $("livestat").textContent = "위치 신호 없음"; return; }
+  catch (e) { $("livestat").textContent = "서버 연결 안 됨"; liveState("lost"); return; }
+  if (!d.live) { $("livestat").textContent = "위치 신호 없음"; liveState("lost"); return; }
+  // a doubtful pose while guiding is said by the server (it holds the guidance), so only without guidance here
+  liveState(d.age_s > 3 ? "lost" : !d.localized ? "search" : d.uncertain && !walking ? "unsure" : "ok");
+  poseUnsure = !!(d.localized && d.uncertain);
   if (d.age_s > 3) $("livestat").textContent = `신호 끊김 (${Math.round(d.age_s)}초 전)`;
   else if (!d.localized) $("livestat").textContent = "지도에서 위치 찾는 중…";
-  else if (d.uncertain) $("livestat").textContent = "위치 확인 중 (안내 잠시 멈춤)";
+  else if (d.uncertain) $("livestat").textContent = walking ? "위치 확인 중 (안내 잠시 멈춤)" : "위치 확인 중 (정확하지 않을 수 있음)";
   else $("livestat").textContent = d.since_loc_s > 10 ? `받는 중 (지도 맞춤 ${Math.round(d.since_loc_s)}초 전)` : "받는 중";
   if (d.localized && d.pose && d.age_s <= 3) { pose = d.pose; showPose(); draw(); }
   if (liveSeq !== null) for (const [, t] of d.say) { bubble("sys", esc(t)); speak(t); }
@@ -360,12 +381,61 @@ async function livePoll() {
 }
 function setLive(on) {
   if (liveTimer) clearInterval(liveTimer);
-  liveTimer = null; liveSeq = null; $("livestat").textContent = "";
+  liveTimer = null; liveSeq = null; liveBad = null; $("livestat").textContent = "";
   $("play").disabled = on;  // the walk comes from the camera, not from the page
   if (on) { stopPlay(); livePoll(); liveTimer = setInterval(livePoll, 500); }
 }
 $("live").onchange = e => setLive(e.target.checked);
 $("ask").onclick = ask;
+// ---------------------------------------------------------------- voice input (/api/stt, recognized on the server)
+// press, speak, stop talking: after 1.2 s of quiet (or 10 s, or a second press) the recording is sent and asked
+let rec = null;
+async function micStart() {
+  let stream;
+  try { stream = await navigator.mediaDevices.getUserMedia({audio: {channelCount: 1, echoCancellation: true, noiseSuppression: true}}); }
+  catch (e) { bubble("sys", "마이크를 쓸 수 없습니다: " + esc(e.message)); return; }
+  const ctx = new AudioContext(), src = ctx.createMediaStreamSource(stream), node = ctx.createScriptProcessor(4096, 1, 1);
+  rec = {stream, ctx, node, chunks: [], t0: performance.now(), voiced: false, quietSince: null};
+  node.onaudioprocess = e => {
+    if (!rec) return;
+    const x = new Float32Array(e.inputBuffer.getChannelData(0)); rec.chunks.push(x);
+    let r = 0; for (const v of x) r += v * v; r = Math.sqrt(r / x.length);
+    const now = performance.now();
+    if (r > 0.02) { rec.voiced = true; rec.quietSince = null; } else if (rec.voiced && rec.quietSince === null) rec.quietSince = now;
+    if ((rec.quietSince !== null && now - rec.quietSince > 1200) || now - rec.t0 > 10000) micStop();
+  };
+  src.connect(node); node.connect(ctx.destination);
+  $("mic").textContent = "듣는 중… (누르면 끝)"; $("mic").classList.add("primary");
+}
+function wav16k(chunks, rate) {
+  const n = chunks.reduce((a, c) => a + c.length, 0), x = new Float32Array(n);
+  let o = 0; for (const c of chunks) { x.set(c, o); o += c.length; }
+  const m = Math.floor(n * 16000 / rate), y = new Int16Array(m);
+  for (let i = 0; i < m; i++) { const v = x[Math.min(n - 1, Math.floor(i * rate / 16000))]; y[i] = Math.max(-1, Math.min(1, v)) * 32767; }
+  const b = new DataView(new ArrayBuffer(44 + m * 2)), w = (o, t) => { for (let i = 0; i < t.length; i++) b.setUint8(o + i, t.charCodeAt(i)); };
+  w(0, "RIFF"); b.setUint32(4, 36 + m * 2, true); w(8, "WAVEfmt "); b.setUint32(16, 16, true); b.setUint16(20, 1, true);
+  b.setUint16(22, 1, true); b.setUint32(24, 16000, true); b.setUint32(28, 32000, true); b.setUint16(32, 2, true);
+  b.setUint16(34, 16, true); w(36, "data"); b.setUint32(40, m * 2, true);
+  for (let i = 0; i < m; i++) b.setInt16(44 + i * 2, y[i], true);
+  return new Blob([b], {type: "audio/wav"});
+}
+async function micStop() {
+  if (!rec) return;
+  const r = rec; rec = null;
+  r.node.disconnect(); r.stream.getTracks().forEach(t => t.stop());
+  const rate = r.ctx.sampleRate; r.ctx.close();
+  $("mic").textContent = "말하기"; $("mic").classList.remove("primary");
+  if (!r.voiced) { bubble("sys", "말소리가 들리지 않았습니다."); return; }
+  const st0 = $("status").textContent; $("status").textContent = "말을 글로 바꾸는 중…";
+  let d;
+  try { d = await (await fetch(`/api/stt?scene=${encodeURIComponent(S.name)}`, {method: "POST", headers: {"Content-Type": "audio/wav"}, body: wav16k(r.chunks, rate)})).json(); }
+  catch (e) { d = {error: e.message}; }
+  $("status").textContent = st0;
+  if (d.error) { bubble("sys", "음성 입력을 쓸 수 없습니다 (" + esc(d.error) + ")"); return; }
+  if (!d.text) { bubble("sys", "알아듣지 못했습니다. 다시 말해 주세요."); return; }
+  $("q").value = d.text; ask();
+}
+$("mic").onclick = () => rec ? micStop() : micStart();
 $("q").addEventListener("keydown", e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); ask(); } });
 $("log").addEventListener("click", e => {
   const s = e.target.dataset && e.target.dataset.s, o = s && S.objects.find(x => x.sym === s);

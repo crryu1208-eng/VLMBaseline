@@ -52,6 +52,10 @@ your position or '걸어 보기' gives turn-by-turn announcements while walking,
 The voice is made by the server without network (`pip install -e .[tts]`: Supertonic, code MIT, weights OpenRAIL-M,
 ONNX on the CPU, ~1.5 s per new sentence, repeated sentences cached; the ~390 MB model is downloaded once into
 ~/.cache/supertonic3). Without it, or with `--no-tts`, the page uses the browser's voice.
+'말하기' asks by voice: the page records until 1.2 s of quiet and the server recognizes it (Whisper large-v3-turbo,
+MIT, on the GPU, ~1.8 GB, ~0.3 s; downloaded once; `--no-stt` turns it off; `python -m vlmbaseline.demo.bench_voice`).
+With '실시간 위치' on, the page also says when the position is missing for 3 s (searching the map, signal lost) and
+when it is back.
 
 Live position (the D435i walking with the user, or a recorded session replayed as if live), in the hydra-dev
 container with the files copied in (`docker cp vlmbaseline/live hydra-dev:/tmp/vlmlive`, and `scripts/*.sh` into it):
@@ -66,7 +70,8 @@ container with the files copied in (`docker cp vlmbaseline/live hydra-dev:/tmp/v
     # http://127.0.0.1:8765/?scene=lab_03&live=1 : '실시간 위치' follows the camera; guidance announcements arrive there
 
 A localization far from where odometry carries the user (a look-alike aisle) is not taken at once: the position is
-marked uncertain ('위치 확인 중') and the guidance waits (vlmbaseline/live/posecore.py).
+marked uncertain ('위치 확인 중') and the guidance waits (vlmbaseline/live/posecore.py); so is a pose carried by
+odometry after odometry was lost, until the map matches again.
 
 In code: `Agent(proc, model, SpatialIndex(scene)).ask("여기서 가장 가까운 화분까지 어떻게 가?", pose=(x, y, yaw))`;
 without `pose`, guidance needs a start object named in the question.

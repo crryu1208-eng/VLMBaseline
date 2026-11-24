@@ -52,3 +52,24 @@ def test_no_gate_takes_every_match():
     walk(c, 0, 5, lambda t: T(t))
     walk(c, 5, 7, lambda t: T(t, 4.0))
     assert abs(c.pose()["pose"][1] - 4.0) < 0.2
+
+
+def test_lost_odometry_marks_until_the_map_matches():
+    c = PoseCore(ALIGN)
+    walk(c, 0, 3, lambda t: T(t))
+    c.on_odom(int(3e9), None, lost=True)  # odometry restarts from a guess
+    walk(c, 3, 10)
+    r = c.pose()
+    assert r["uncertain"] and r["why"] == "lost"
+    walk(c, 10, 11, lambda t: T(t, 3.0))  # after a loss a match far from odometry is taken at once
+    r = c.pose()
+    assert not r["uncertain"] and r["why"] is None and abs(r["pose"][1] - 3.0) < 0.01
+
+
+def test_odometry_alone_is_marked_only_with_stale_m():
+    c, d = PoseCore(ALIGN), PoseCore(ALIGN, stale_m=10.0)
+    for x in (c, d):
+        walk(x, 0, 2, lambda t: T(t))
+        walk(x, 2, 20)
+    assert not c.pose()["uncertain"]
+    assert d.pose()["uncertain"] and d.pose()["why"] == "far"

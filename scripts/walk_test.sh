@@ -17,7 +17,7 @@ if docker exec hydra-dev pgrep -f realsense2_camera_node > /dev/null; then
 fi
 if ! curl -s -m 2 http://127.0.0.1:8765/api/scenes > /dev/null; then
   echo "starting the demo server (log: outputs/demo.log) ..."
-  setsid nohup .venv/bin/python -m vlmbaseline.demo.server --port 8765 > outputs/demo.log 2>&1 < /dev/null &
+  HF_HUB_OFFLINE=1 setsid nohup .venv/bin/python -m vlmbaseline.demo.server --port 8765 > outputs/demo.log 2>&1 < /dev/null &
   for i in $(seq 1 180); do curl -s -m 2 http://127.0.0.1:8765/api/scenes > /dev/null && break; sleep 1; done
   curl -s -m 2 http://127.0.0.1:8765/api/scenes > /dev/null || { echo "demo server did not start, see outputs/demo.log"; exit 1; }
 fi
