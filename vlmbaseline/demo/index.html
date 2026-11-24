@@ -345,15 +345,19 @@ const LIVE_SAY_S = 3, LIVE_SAY = {search: "지도에서 위치를 찾고 있습�
                                   lost: "위치 신호가 끊겼습니다. 잠시 멈춰 주세요.", back: "위치를 찾았습니다.",
                                   unsure: "위치가 정확하지 않을 수 있습니다. 주변을 천천히 둘러봐 주세요."};
 let liveBad = null;  // {kind, since, said}
+function logSay(text) {  // the server keeps what the page said in the session log (demo/eventlog.py)
+  fetch("/api/event", {method: "POST", headers: {"Content-Type": "application/json"},
+                       body: JSON.stringify({kind: "page_say", scene: S.name, text})}).catch(() => {});
+}
 function liveState(kind) {  // kind: "ok" or a missing / doubtful position ("search" / "lost" / "unsure")
   const now = Date.now() / 1000;
   if (kind === "ok") {
-    if (liveBad && liveBad.said) { bubble("sys", LIVE_SAY.back); speak(LIVE_SAY.back); }
+    if (liveBad && liveBad.said) { bubble("sys", LIVE_SAY.back); speak(LIVE_SAY.back); logSay(LIVE_SAY.back); }
     liveBad = null; return;
   }
   if (!liveBad || liveBad.kind !== kind) liveBad = {kind, since: now, said: liveBad ? liveBad.said : false, saidKind: liveBad && liveBad.saidKind};
   if (now - liveBad.since >= LIVE_SAY_S && liveBad.saidKind !== kind) {
-    liveBad.said = true; liveBad.saidKind = kind; bubble("sys", LIVE_SAY[kind]); speak(LIVE_SAY[kind]);
+    liveBad.said = true; liveBad.saidKind = kind; bubble("sys", LIVE_SAY[kind]); speak(LIVE_SAY[kind]); logSay(LIVE_SAY[kind]);
   }
 }
 async function livePoll() {

@@ -56,6 +56,10 @@ ONNX on the CPU, ~1.5 s per new sentence, repeated sentences cached; the ~390 MB
 MIT, on the GPU, ~1.8 GB, ~0.3 s; downloaded once; `--no-stt` turns it off; `python -m vlmbaseline.demo.bench_voice`).
 With '실시간 위치' on, the page also says when the position is missing for 3 s (searching the map, signal lost) and
 when it is back.
+Each server run keeps a session log in outputs/logs/demo_<start>.jsonl (questions, tools called, answers,
+announcements and why, position state changes, recognized speech, what the page said); `python -m
+vlmbaseline.demo.eventlog` prints the latest as a timeline. `--keep-audio` also keeps the spoken questions, `--no-log`
+turns it off.
 
 Live position (the D435i walking with the user, or a recorded session replayed as if live), in the hydra-dev
 container with the files copied in (`docker cp vlmbaseline/live hydra-dev:/tmp/vlmlive`, and `scripts/*.sh` into it):

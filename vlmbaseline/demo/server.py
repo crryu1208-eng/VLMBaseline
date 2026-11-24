@@ -19,6 +19,7 @@ from urllib.parse import parse_qs, urlparse
 
 import numpy as np
 
+from vlmbaseline.demo.eventlog import EventLog, compact_trace, wav_seconds
 from vlmbaseline.scene import attach_areas, attach_vlm, load_export
 from vlmbaseline.spatial import nav
 from vlmbaseline.spatial.follow import Follower
@@ -34,8 +35,9 @@ HOLD_SAY = {"jump": "위치를 다시 확인하고 있습니다. 천천히 걸�
             "far": "위치가 정확하지 않을 수 있습니다. 지도와 다시 맞출 때까지 안내를 멈춥니다."}
 
 class Demo:
-    def __init__(self, scenes, model_id, aug, use_model=True, use_tts=True, use_stt=True):
+    def __init__(self, scenes, model_id, aug, use_model=True, use_tts=True, use_stt=True, log=None):
         self.aug = Path(aug)
+        self.log = log  # eventlog.EventLog or None
         self.speaker = self.listener = None
         if use_tts:
             from vlmbaseline.demo.tts import Speaker
@@ -156,6 +158,8 @@ class Demo:
                      if isinstance(tr.get("result"), dict) and tr["result"].get("warning")), None)
         cited = [x for x in dict.fromkeys(re.findall(r"O\d+", ans)) if x in idx.obj]
         follow = self._start_follow(name, trace, pose)
+        self.ev("ask", scene=name, q=q, pose=pose, history=len(history or []), answer=ans, tools=compact_trace(trace),
+                follow=follow and follow["goal"], sec=round(time.perf_counter() - t, 1))
         return {"answer": ans, "trace": trace, "route": route, "cited": cited, "warning": warn, "goal_area": goal_area,
                 "follow": follow, "sec": round(time.perf_counter() - t, 1)}
 
@@ -181,11 +185,13 @@ class Demo:
             lv = self.live.get(name)
             if lv is not None:
                 lv["state"] = None  # the page shows the new guidance from the answer, not the last one's state
+            self.ev("follow_start", scene=name, goal=f.name, remaining_m=st["remaining_m"], pose=pose)
             return {"goal": f.name, "route": st["route"], "remaining_m": st["remaining_m"]}
         return None
 
     def stop_follow(self, name):
-        self.follow.pop(name, None)
+        if self.follow.pop(name, None) is not None:
+            self.ev("follow_stop", scene=name)
         if name in self.live:
             self.live[name]["state"] = None
 
@@ -197,9 +203,16 @@ class Demo:
             return f.update(pose)
 
     # ------------------------------------------------------------ live pose (mapping pipeline)
-    @staticmethod
-    def _say(lv, texts):
+    def ev(self, kind, **kw):
+        if self.log is not None:
+            try:
+                self.log.add(kind, **kw)
+            except OSError as e:  # a full disk must not stop the guidance
+                print("log:", e, flush=True)
+
+    def _say(self, lv, texts, why=None, scene=None):
         for t in texts:
+            self.ev("say", scene=scene, text=t, why=why)
             lv["seq"] += 1
             lv["say"].append([lv["seq"], t])
         del lv["say"][:-50]
@@ -209,7 +222,14 @@ class Demo:
         name = rec["scene"]
         lv = self.live.setdefault(name, {"seq": 0, "say": []})
         unc = bool(rec.get("uncertain"))
-        lv.update(t=time.time(), localized=bool(rec.get("localized")), since_loc_s=rec.get("since_loc_s"), uncertain=unc,
+        now = time.time()
+        state = "ok" if rec.get("localized") and not unc else f"uncertain:{rec.get('why')}" if unc else "searching"
+        gap = now - lv["t"] if "t" in lv else 0
+        if state != lv.get("logstate") or gap > 3:
+            lv["logstate"] = state
+            self.ev("live", scene=name, state=state, pose=rec.get("pose"), since_loc_s=rec.get("since_loc_s"),
+                    gap_s=round(gap, 1) if gap > 3 else None)
+        lv.update(t=now, localized=bool(rec.get("localized")), since_loc_s=rec.get("since_loc_s"), uncertain=unc,
                   why=rec.get("why"))
         if not rec.get("localized") or not rec.get("pose"):
             return {"ok": True, "follow": None}
@@ -220,14 +240,16 @@ class Demo:
             # the pose may be wrong (live/posecore.py): no turn, reroute or arrival from it; say so once
             if not lv.get("held"):
                 lv["held"] = True
-                self._say(lv, [HOLD_SAY.get(rec.get("why"), HOLD_SAY["jump"])])
+                self._say(lv, [HOLD_SAY.get(rec.get("why"), HOLD_SAY["jump"])], "hold", name)
             return {"ok": True, "follow": None, "held": True}
         if lv.get("held") and f is not None and not f.arrived:
-            self._say(lv, ["위치를 다시 맞췄습니다. 안내를 이어 갑니다."])
+            self._say(lv, ["위치를 다시 맞췄습니다. 안내를 이어 갑니다."], "resume", name)
         lv["held"] = False
         if f is not None and not f.arrived:
             st = self.follow_update(name, tuple(lv["pose"]))
-            self._say(lv, st.get("say", []))
+            self._say(lv, st.get("say", []), "follow", name)
+            if st.get("arrived"):
+                self.ev("arrived", scene=name, goal=f.name, pose=lv["pose"])
             lv["state"] = {k: st.get(k) for k in ("next", "remaining_m", "arrived", "goal", "route")}
         return {"ok": True, "follow": st}
 
@@ -301,13 +323,24 @@ def make_handler(demo: Demo):
                 if not demo.listener or n > 5_000_000:
                     return self._send(503 if not demo.listener else 413, {"error": "voice input"})
                 sc = parse_qs(urlparse(self.path).query).get("scene", [None])[0]
+                t0 = time.perf_counter()
+                wav = self.rfile.read(n)
                 try:
-                    t = demo.listener.text(self.rfile.read(n), demo.stt_hint.get(sc))
+                    t = demo.listener.text(wav, demo.stt_hint.get(sc))
                 except Exception as e:
+                    demo.ev("stt_error", scene=sc, error=f"{type(e).__name__}: {e}")
                     return self._send(500, {"error": f"{type(e).__name__}: {e}"})
+                demo.ev("stt", scene=sc, text=t, audio_s=wav_seconds(wav),
+                        sec=round(time.perf_counter() - t0, 2), audio=demo.log.audio(wav) if demo.log else None)
                 if t is None:
                     return self._send(503, {"error": "voice input not loaded"})
                 return self._send(200, {"text": t})
+            if path == "/api/event":  # said by the page itself (searching, signal lost, back)
+                n = int(self.headers.get("Content-Length", 0))
+                req = json.loads(self.rfile.read(min(n, 4000)) or b"{}")
+                if req.get("kind") == "page_say" and req.get("scene") in demo.idx:
+                    demo.ev("page_say", scene=req["scene"], text=str(req.get("text", ""))[:300])
+                return self._send(200, {"ok": True})
             if path == "/api/follow_stop":
                 req = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))) or b"{}")
                 demo.stop_follow(req.get("scene"))
@@ -318,7 +351,10 @@ def make_handler(demo: Demo):
                     if req.get("scene") not in demo.idx:
                         return self._send(400, {"error": "scene"})
                     pose = tuple(float(v) for v in req["pose"])
-                    return self._send(200, demo.follow_update(req["scene"], pose))
+                    st = demo.follow_update(req["scene"], pose)
+                    for t in st.get("say", []):
+                        demo.ev("say", scene=req["scene"], text=t, why="follow_map", pose=pose)
+                    return self._send(200, st)
                 except Exception as e:
                     return self._send(500, {"error": f"{type(e).__name__}: {e}"})
             if path != "/api/ask":
@@ -334,6 +370,7 @@ def make_handler(demo: Demo):
                         for h in (req.get("history") or [])[-3:] if isinstance(h, dict)]
                 self._send(200, demo.ask(name, q, pose, hist))
             except Exception as e:  # report to the page instead of dropping the connection
+                demo.ev("ask_error", q=locals().get("q"), error=f"{type(e).__name__}: {e}")
                 self._send(500, {"error": f"{type(e).__name__}: {e}"})
 
     return H
@@ -356,8 +393,16 @@ def main():
     ap.add_argument("--port", type=int, default=8765)
     ap.add_argument("--no-tts", action="store_true", help="no speech on the server (the page uses the browser's voice)")
     ap.add_argument("--no-stt", action="store_true", help="no voice input (Whisper on the GPU, ~1.8 GB)")
+    ap.add_argument("--no-log", action="store_true", help="no session log (outputs/logs/, demo/eventlog.py)")
+    ap.add_argument("--keep-audio", action="store_true", help="keep the spoken questions next to the log")
     a = ap.parse_args()
-    demo = Demo(a.scenes, a.model, a.aug, use_model=not a.no_model, use_tts=not a.no_tts, use_stt=not a.no_stt)
+    log = None if a.no_log else EventLog(keep_audio=a.keep_audio)
+    demo = Demo(a.scenes, a.model, a.aug, use_model=not a.no_model, use_tts=not a.no_tts, use_stt=not a.no_stt,
+                log=log)
+    demo.ev("start", scenes=a.scenes, model=None if a.no_model else a.model, tts=not a.no_tts, stt=not a.no_stt,
+            keep_audio=a.keep_audio)
+    if log:
+        print("log:", log.path, flush=True)
     srv = ThreadingHTTPServer(("127.0.0.1", a.port), make_handler(demo))
     print(f"http://127.0.0.1:{a.port}", flush=True)
     srv.serve_forever()
