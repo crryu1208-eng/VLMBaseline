@@ -44,7 +44,9 @@ ros2 launch realsense2_camera rs_launch.py \
   align_depth.enable:=true enable_sync:=true enable_gyro:=true enable_accel:=true unite_imu_method:=2 \
   < /dev/null > "$OUT/camera.log" 2>&1 &
 PIDS+=($!)
-# odometry as in the Hydra workspace's d435i_obs.launch.yaml (IMU orientation, reset at the last pose after a loss)
+# odometry as in the Hydra workspace's d435i_obs.launch.yaml (IMU orientation, reset at the last pose after a loss);
+# more features spread over a 3x4 grid (2026-11-27 replays, round corridor, poses >1 m off the floor:
+# 149/252 -> 0/242 on the 11-24 day walk, 80/120 -> 12/124 on the dark 11-26 walk; ~26 ms per frame)
 ros2 run imu_filter_madgwick imu_filter_madgwick_node --ros-args -r __ns:=/rtabmap -r __node:=imu_filter \
   -p use_mag:=false -p publish_tf:=false -p world_frame:=enu -r imu/data_raw:=$CAM/imu -r imu/data:=/rtabmap/imu \
   < /dev/null > "$OUT/imu.log" 2>&1 &
@@ -53,7 +55,8 @@ ros2 run rtabmap_odom rgbd_odometry --ros-args -r __ns:=/rtabmap \
   -p frame_id:=camera_link -p odom_frame_id:=odom -p publish_tf:=true -p approx_sync:=false \
   -p qos:=1 -p qos_camera_info:=1 -p topic_queue_size:=30 -p sync_queue_size:=30 -p wait_for_transform:=0.2 \
   -p "Odom/ResetCountdown:='1'" -p wait_imu_to_init:=true -p always_check_imu_tf:=true \
-  -p "Vis/MaxFeatures:='600'" -p "OdomF2M/MaxSize:='1200'" \
+  -p "Vis/MaxFeatures:='1000'" -p "OdomF2M/MaxSize:='2000'" \
+  -p "GFTT/MinDistance:='5'" -p "GFTT/QualityLevel:='0.0001'" -p "Vis/GridRows:='3'" -p "Vis/GridCols:='4'" \
   -r rgb/image:=$CAM/color/image_raw -r depth/image:=$CAM/aligned_depth_to_color/image_raw \
   -r rgb/camera_info:=$CAM/color/camera_info -r imu:=/rtabmap/imu \
   < /dev/null > "$OUT/odom.log" 2>&1 &
